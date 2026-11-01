@@ -1,0 +1,23 @@
+services:
+  nzbwatch:
+    # Docker Hub release image
+    image: ${DOCKER_IMAGE:-yourusername/nzbwatch:0.1.0}
+    container_name: nzbwatch
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8787}:8787"
+    volumes:
+      - nzbwatch-data:/data
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=5)"]
+      interval: 45s
+      timeout: 8s
+      retries: 3
+volumes:
+  nzbwatch-data:

@@ -114,3 +114,9 @@ python -m pytest -q
 - NZBHydra2: https://github.com/theotherp/nzbhydra2/wiki/External-API,-RSS-and-cached-queries
 - SABnzbd: https://sabnzbd.org/wiki/advanced/api
 - Pushover: https://pushover.net/api
+
+## Publishing to GitHub / Docker Hub
+
+See [PUBLISHING.md](PUBLISHING.md) for setting up the GitHub repository,
+Docker Hub access token, automated test and release workflows, and the
+`compose.deploy.yaml` file for deploying published images without building locally.
