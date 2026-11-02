@@ -1,7 +1,7 @@
 services:
   nzbwatch:
     # Docker Hub release image
-    image: ${DOCKER_IMAGE:-yourusername/nzbwatch:0.1.0}
+    image: ${DOCKER_IMAGE:-virtike/nzbwatch:0.2.7}
     container_name: nzbwatch
     restart: unless-stopped
     env_file: .env
