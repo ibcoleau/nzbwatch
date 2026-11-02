@@ -43,8 +43,92 @@ def normalize_title(s: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", s.lower()))
 
 
+# Only remove the technical suffix of a release name. Keep the title, year,
+# season/episode and other identifying text to avoid broad false matches.
+TECHNICAL = re.compile(
+    r"^(?:2160p|1080p|720p|576p|480p|360p|4k|uhd|fhd|hd|sd|"
+    r"web[.-]?dl|webrip|bluray|blu[.-]?ray|bdrip|brrip|hdtv|hddvd|"
+    r"dvdrip|hdrip|hdr|dv|dolby[.-]?vision|av1|x26[45]|h[. ]?26[45]|"
+    r"hevc|avc|mp4|mkv|avi|aac|dts|ddp?[257]?|atmos|proper|repack|"
+    r"internal|remux|xxx)$", re.I
+)
+RES_PATTERN = re.compile(r"(?<![a-z0-9])(?:2160p|1080p|720p|576p|480p|360p|4k|uhd)(?![a-z0-9])", re.I)
+PIXEL_PATTERN = re.compile(r"(?<!\d)(?:3840\s*[x×]\s*2160|1920\s*[x×]\s*1080|1280\s*[x×]\s*720)(?!\d)", re.I)
+RES_HEIGHT = {"2160p": 2160, "1080p": 1080, "720p": 720, "576p": 576, "480p": 480, "360p": 360}
+
+
+def parse_resolution(title: str) -> str | None:
+    """Recognise explicit height and common 4K/UHD and pixel-dimension markers."""
+    m = RES_PATTERN.search(title)
+    if m:
+        label = m.group().lower()
+        return "2160p" if label in ("4k", "uhd") else label
+    m = PIXEL_PATTERN.search(title)
+    if m:
+        dimension = m.group().lower().replace(" ", "")
+        return "2160p" if "2160" in dimension else "1080p" if "1080" in dimension else "720p"
+    return None
+
+
+def simplify_query(query: str, strip_groups: bool = True) -> str:
+    """Strip technical release suffixes; avoid treating a full filename as a search title."""
+    value = query.strip()
+    value = re.sub(r"(?i)\.(?:mkv|mp4|avi|nzb)$", "", value)
+    # The -GROUP token is only stripped when a release-tech marker appears.
+    if strip_groups and re.search(r"(?i)(?:\.|\s|_)(?:2160p|1080p|720p|480p|web[.-]?dl|webrip|bluray|mp4|mkv|xxx)(?:\.|\s|_|-)", value):
+        value = re.sub(r"-([a-z0-9]{2,24})$", "", value, flags=re.I)
+    value = re.sub(r"[._]+", " ", value)
+    parts = value.split()
+    kept = []
+    for part in parts:
+        if TECHNICAL.fullmatch(part):
+            break
+        kept.append(part)
+    cleaned = " ".join(kept).strip(" -")
+    # Do not generate an empty/one-letter query from overzealous cleaning.
+    return cleaned if len(normalize_title(cleaned).replace(" ", "")) >= 3 else query.strip()
+
+
+def search_query(watch: dict, config: dict) -> str:
+    if config.get("clean_search_terms", True) and watch.get("broad_search", 1):
+        return simplify_query(watch["query"], config.get("strip_release_groups", True))
+    return watch["query"].strip()
+
+
+def quality_allowed(watch: dict, result: dict, config: dict) -> bool:
+    mode = watch.get("resolution_mode", "inherit")
+    enabled = config.get("resolution_enabled", False) if mode == "inherit" else mode == "on"
+    if not enabled:
+        return True
+    resolution = result.get("resolution") or parse_resolution(result["title"])
+    if not resolution:
+        return config.get("allow_unknown_resolution", False)
+    return RES_HEIGHT[resolution] >= RES_HEIGHT[config.get("fallback_min_resolution", "720p")]
+
+
+def quality_sort_key(result: dict, config: dict) -> tuple:
+    """Sort by preferred resolution, then descending fallback quality and date."""
+    order = config.get("resolution_order", ["1080p", "2160p", "720p", "480p"])
+    resolution = result.get("resolution") or parse_resolution(result["title"])
+    if resolution in order:
+        rank = order.index(resolution)
+    elif resolution:
+        rank = len(order) + (2160 - RES_HEIGHT[resolution]) / 10000
+    else:
+        rank = len(order) + 100
+    return (rank, -(datetime.fromisoformat(result["published"]).timestamp() if result.get("published") else 0))
+
+
 def fingerprint(s: str) -> str:
     return hashlib.sha256(normalize_title(s).encode()).hexdigest()
+
+
+def content_fingerprint(s: str) -> str:
+    # For quality-tagged releases, dedupe multiple resolutions of the same title.
+    # Unclassified material retains the original exact-title fingerprint.
+    if parse_resolution(s):
+        return fingerprint(simplify_query(s))
+    return fingerprint(s)
 
 
 def words(s: str) -> list[str]:
@@ -100,7 +184,9 @@ def parse_rss(data: bytes) -> list[dict]:
         if not title:
             continue
         enc = item.find("enclosure")
-        link = (item.findtext("link") or (enc.get("url") if enc is not None else "") or "").strip()
+        # <link> may be an indexer details page.  The enclosure URL is the
+        # Newznab download URL and should be preferred when present.
+        link = ((enc.get("url") if enc is not None else "") or item.findtext("link") or "").strip()
         if not link:
             continue
         attrs = {a.get("name"): a.get("value") for a in item.findall(f"{{{NEWZNAB}}}attr")}
@@ -117,6 +203,39 @@ def parse_rss(data: bytes) -> list[dict]:
                 pass
         items.append({"title": title, "link": link, "guid": item.findtext("guid") or "", "size_bytes": size, "published": published, "category": attrs.get("category", "")})
     return items
+
+
+def nzb_upload_info(content: bytes, content_type: str = "") -> tuple[str, str]:
+    """Validate a Hydra download response without mistaking an HTML page for NZB.
+
+    SABnzbd accepts regular NZBs and supported compressed NZB archives. The
+    filename extension is significant for its file-upload parser.
+    """
+    if not content:
+        raise ValueError("Hydra returned an empty download response")
+    if content.startswith(b"\x1f\x8b"):
+        return ("watch.nzb.gz", "application/gzip")
+    if content.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        return ("watch.nzb.zip", "application/zip")
+    if content.startswith(b"Rar!\x1a\x07"):
+        return ("watch.nzb.rar", "application/vnd.rar")
+    # XML declaration, comments and namespaces may precede the <nzb> tag.
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        root = None
+    if root is not None:
+        name = root.tag.rsplit("}", 1)[-1].lower() if isinstance(root.tag, str) else ""
+        if name == "nzb":
+            return ("watch.nzb", "application/x-nzb")
+        if name in ("html", "error", "rss"):
+            raise ValueError(f"Hydra returned {name.upper()} instead of an NZB (check the download link and Hydra API access)")
+    mime = content_type.split(";", 1)[0].strip().lower() or "unknown"
+    if mime in ("text/html", "application/xhtml+xml") or content.lstrip()[:100].lower().startswith((b"<!doctype html", b"<html")):
+        raise ValueError("Hydra returned an HTML page instead of an NZB (check the download link and Hydra API access)")
+    if mime == "application/json" or content.lstrip().startswith((b"{", b"[")):
+        raise ValueError("Hydra returned JSON instead of an NZB (check the download link and Hydra API access)")
+    raise ValueError(f"Hydra returned an unsupported download format ({mime}); expected NZB/XML, gzip or ZIP")
 
 
 class Store:
@@ -149,12 +268,13 @@ class Store:
                 sab_category TEXT NOT NULL DEFAULT '', min_mb REAL, max_mb REAL,
                 max_age_days INTEGER, max_grabs INTEGER NOT NULL DEFAULT 1,
                 grab_count INTEGER NOT NULL DEFAULT 0, poll_minutes INTEGER NOT NULL DEFAULT 30,
+                broad_search INTEGER NOT NULL DEFAULT 1, resolution_mode TEXT NOT NULL DEFAULT 'inherit',
                 last_checked TEXT, next_run TEXT, last_error TEXT,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS matches (
                 id INTEGER PRIMARY KEY, watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
-                title TEXT NOT NULL, fingerprint TEXT NOT NULL, size_bytes INTEGER,
+                title TEXT NOT NULL, fingerprint TEXT NOT NULL, size_bytes INTEGER, resolution TEXT,
                 published TEXT, link TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'found',
                 nzo_id TEXT, note TEXT, found_at TEXT NOT NULL, queued_at TEXT, finished_at TEXT,
                 UNIQUE(watch_id, fingerprint)
@@ -162,13 +282,26 @@ class Store:
             CREATE INDEX IF NOT EXISTS matches_nzo ON matches(nzo_id);
             CREATE TABLE IF NOT EXISTS grabs (
                 fingerprint TEXT PRIMARY KEY, match_id INTEGER NOT NULL,
-                nzo_id TEXT NOT NULL, queued_at TEXT NOT NULL
+                nzo_id TEXT NOT NULL, queued_at TEXT NOT NULL, content_key TEXT
             );
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY, type TEXT NOT NULL, message TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
             """)
+            # Online migrations for installations already running v0.1.0.
+            watch_columns = {r[1] for r in db.execute("PRAGMA table_info(watches)")}
+            if "broad_search" not in watch_columns:
+                db.execute("ALTER TABLE watches ADD COLUMN broad_search INTEGER NOT NULL DEFAULT 0")
+            if "resolution_mode" not in watch_columns:
+                db.execute("ALTER TABLE watches ADD COLUMN resolution_mode TEXT NOT NULL DEFAULT 'inherit'")
+            match_columns = {r[1] for r in db.execute("PRAGMA table_info(matches)")}
+            if "resolution" not in match_columns:
+                db.execute("ALTER TABLE matches ADD COLUMN resolution TEXT")
+            grab_columns = {r[1] for r in db.execute("PRAGMA table_info(grabs)")}
+            if "content_key" not in grab_columns:
+                db.execute("ALTER TABLE grabs ADD COLUMN content_key TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS grabs_content_key ON grabs(content_key)")
 
     @staticmethod
     def rows(cursor):
@@ -184,8 +317,8 @@ class Store:
             return dict(row) if row else None
 
     def save_watch(self, data: dict, wid: int | None = None):
-        columns = ["name", "query", "enabled", "mode", "match_mode", "required_words", "excluded_words", "categories", "sab_category", "min_mb", "max_mb", "max_age_days", "max_grabs", "poll_minutes"]
-        vals = [data[c] for c in columns]
+        columns = ["name", "query", "enabled", "mode", "match_mode", "required_words", "excluded_words", "categories", "sab_category", "min_mb", "max_mb", "max_age_days", "max_grabs", "poll_minutes", "broad_search", "resolution_mode"]
+        vals = [data.get(c, {"broad_search": True, "resolution_mode": "inherit"}.get(c)) for c in columns]
         with self.conn() as db:
             if wid is None:
                 c = db.execute(f"INSERT INTO watches ({','.join(columns)},created_at,updated_at,next_run) VALUES ({','.join(['?']*len(columns))},?,?,?)", (*vals, now(), now(), now()))
@@ -207,7 +340,7 @@ class Store:
 
     def recent(self):
         with self.conn() as db:
-            matches = self.rows(db.execute("SELECT m.id,m.watch_id,w.name AS watch_name,m.title,m.size_bytes,m.published,m.status,m.nzo_id,m.note,m.found_at,m.queued_at,m.finished_at FROM matches m JOIN watches w ON w.id=m.watch_id ORDER BY m.id DESC LIMIT 250"))
+            matches = self.rows(db.execute("SELECT m.id,m.watch_id,w.name AS watch_name,m.title,m.size_bytes,m.resolution,m.published,m.status,m.nzo_id,m.note,m.found_at,m.queued_at,m.finished_at FROM matches m JOIN watches w ON w.id=m.watch_id ORDER BY m.id DESC LIMIT 250"))
             events = self.rows(db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 80"))
             counts = dict(db.execute("SELECT (SELECT count(*) FROM watches) watches, (SELECT count(*) FROM watches WHERE enabled=1) active, (SELECT count(*) FROM matches WHERE status='found') found, (SELECT count(*) FROM matches WHERE status='queued') queued, (SELECT count(*) FROM matches WHERE status='completed') completed").fetchone())
         return {"matches": matches, "events": events, "counts": counts}
@@ -251,7 +384,7 @@ class Engine:
                 pass
 
     async def hydra_search(self, watch: dict):
-        params = {"t": "search", "q": watch["query"], "apikey": self.config["hydra_key"], "limit": 100}
+        params = {"t": "search", "q": search_query(watch, self.config), "apikey": self.config["hydra_key"], "limit": 100}
         if watch.get("categories"):
             params["cat"] = watch["categories"]
         r = await self.client.get(self.config["hydra_url"] + "/api", params=params)
@@ -269,8 +402,8 @@ class Engine:
             if r.json().get("status") != 1:
                 raise ValueError("Pushover rejected notification")
         except Exception as ex:
-            log.warning("Pushover failed: %s", ex)
-            self.store.log("warning", f"Pushover notification failed: {ex}")
+            log.warning("Pushover failed: %s", safe_error(ex))
+            self.store.log("warning", f"Pushover notification failed: {safe_error(ex)}")
 
     async def check_due(self):
         if self.lock.locked():
@@ -287,7 +420,8 @@ class Engine:
                 if not watch or not watch["enabled"]:
                     continue
                 with self.store.conn() as db:
-                    db.execute("UPDATE watches SET next_run=?,last_checked=?,last_error=NULL WHERE id=?", (iso_after(watch["poll_minutes"]), now(), wid))
+                    minutes = watch["poll_minutes"] or self.config.get("scan_interval_minutes", 30)
+                    db.execute("UPDATE watches SET next_run=?,last_checked=?,last_error=NULL WHERE id=?", (iso_after(minutes), now(), wid))
                 try:
                     result = await self.check_watch(watch)
                     self.store.log("search", f"{watch['name']}: {result['searched']} results, {result['matched']} matched, {result['new']} new")
@@ -302,8 +436,20 @@ class Engine:
         if not self.config["hydra_url"] or not self.config["hydra_key"]:
             raise RuntimeError("NZBHydra2 settings are missing")
         results = await self.hydra_search(watch)
-        eligible = [r for r in results if matching(watch, r)]
-        eligible.sort(key=lambda r: r.get("published") or "", reverse=True)
+        effective = {**watch, "query": search_query(watch, self.config)}
+        for r in results:
+            r["resolution"] = parse_resolution(r["title"])
+        eligible = [r for r in results if matching(effective, r) and quality_allowed(watch, r, self.config)]
+        quality_on = self.config.get("resolution_enabled", False) if watch.get("resolution_mode", "inherit") == "inherit" else watch.get("resolution_mode") == "on"
+        if quality_on:
+            eligible.sort(key=lambda r: quality_sort_key(r, self.config))
+        else:
+            eligible.sort(key=lambda r: r.get("published") or "", reverse=True)
+        # Never attempt an unsafe empty/broad query.
+        clean_tokens = normalize_title(effective["query"]).split()
+        if (len("".join(clean_tokens)) < 3 or
+            (watch["mode"] == "auto" and len(clean_tokens) < 2 and len(clean_tokens[0]) < 10)):
+            raise ValueError("Search query is too broad for automatic downloading; add more identifying words or use notify-only")
         new_count = 0
         pushed = 0
         queued_this_scan = 0
@@ -313,8 +459,12 @@ class Engine:
                 existing = db.execute("SELECT id FROM matches WHERE watch_id=? AND fingerprint=?", (watch["id"], fp)).fetchone()
                 if existing:
                     mid = existing[0]
+                    # A previously stored <link> may be a details page instead of
+                    # the NZB enclosure. Refresh only retryable matches so a
+                    # re-search repairs old failures without affecting queued jobs.
+                    db.execute("UPDATE matches SET link=? WHERE id=? AND status IN ('found','failed') AND link<>?", (r["link"], mid, r["link"]))
                 else:
-                    c = db.execute("INSERT INTO matches(watch_id,title,fingerprint,size_bytes,published,link,status,found_at) VALUES(?,?,?,?,?,?,?,?)", (watch["id"], r["title"], fp, r["size_bytes"], r["published"], r["link"], "found", now()))
+                    c = db.execute("INSERT INTO matches(watch_id,title,fingerprint,size_bytes,resolution,published,link,status,found_at) VALUES(?,?,?,?,?,?,?,?,?)", (watch["id"], r["title"], fp, r["size_bytes"], r["resolution"], r["published"], r["link"], "found", now()))
                     mid = c.lastrowid
                     new_count += 1
             if not existing:
@@ -344,7 +494,8 @@ class Engine:
             raise KeyError(m["watch_id"])
         with self.store.conn() as db:
             used = db.execute("SELECT grab_count FROM watches WHERE id=?", (w["id"],)).fetchone()[0]
-            globally = db.execute("SELECT nzo_id FROM grabs WHERE fingerprint=?", (m["fingerprint"],)).fetchone()
+            key = content_fingerprint(m["title"]) if self.config.get("dedupe_across_resolutions", True) else None
+            globally = db.execute("SELECT nzo_id FROM grabs WHERE fingerprint=? OR (content_key IS NOT NULL AND content_key=?)", (m["fingerprint"], key)).fetchone()
         if globally:
             with self.store.conn() as db:
                 db.execute("UPDATE matches SET status='skipped',note=? WHERE id=?", ("Already queued for another watch (SAB ID: " + globally[0] + ")", mid))
@@ -365,6 +516,7 @@ class Engine:
             # Both Hydra and SAB must then be network-reachable from SAB's container.
             params = {} if "apikey=" in source.query.lower() else {"apikey": self.config["hydra_key"]}
             async with self.client.stream("GET", url, params=params) as r:
+                content_type = r.headers.get("content-type", "")
                 if r.is_redirect:
                     content = None
                 else:
@@ -392,10 +544,9 @@ class Engine:
                 sab_params["name"] = download_url
                 res = await self.client.post(self.config["sab_url"] + "/api", params=sab_params)
             else:
-                if b"<nzb" not in content[:4000].lower():
-                    raise ValueError("Hydra did not return an NZB document")
+                filename, mime = nzb_upload_info(content, content_type)
                 sab_params["mode"] = "addfile"
-                res = await self.client.post(self.config["sab_url"] + "/api", params=sab_params, files={"nzbfile": ("watch.nzb", content, "application/x-nzb")})
+                res = await self.client.post(self.config["sab_url"] + "/api", params=sab_params, files={"nzbfile": (filename, content, mime)})
             res.raise_for_status()
             data = res.json()
             ids = data.get("nzo_ids") or []
@@ -404,7 +555,7 @@ class Engine:
             nzo_id = str(ids[0])
             with self.store.conn() as db:
                 # Keep a global unique title fingerprint across watch rules.
-                db.execute("INSERT INTO grabs(fingerprint,match_id,nzo_id,queued_at) VALUES(?,?,?,?)", (m["fingerprint"], mid, nzo_id, now()))
+                db.execute("INSERT INTO grabs(fingerprint,match_id,nzo_id,queued_at,content_key) VALUES(?,?,?,?,?)", (m["fingerprint"], mid, nzo_id, now(), key))
                 db.execute("UPDATE matches SET status='queued',nzo_id=?,queued_at=?,note=NULL WHERE id=?", (nzo_id, now(), mid))
                 db.execute("UPDATE watches SET grab_count=grab_count+1, enabled=CASE WHEN max_grabs > 0 AND grab_count+1 >= max_grabs THEN 0 ELSE enabled END WHERE id=?", (w["id"],))
             self.store.log("queued", f"{w['name']}: {m['title']}")

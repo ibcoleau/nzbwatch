@@ -16,7 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 
-from .core import Engine, Store, now, safe_error
+from .core import Engine, Store, now, safe_error, search_query, parse_resolution
+from .settings import SettingsFile, RESOLUTIONS, NOTIFY
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 BASE = Path(__file__).parent
@@ -27,23 +28,8 @@ if len(PASSWORD) < 12 or len(SECRET) < 32 or PASSWORD.startswith("CHANGE_") or S
     raise RuntimeError("Set ADMIN_PASSWORD (at least 12 chars) and APP_SECRET (at least 32 chars) in .env")
 
 
-def fixed_url(value: str) -> str:
-    u = value.strip().rstrip("/")
-    if u and not u.startswith(("http://", "https://")):
-        raise RuntimeError("Configure a valid HTTP(S) service URL")
-    return u
-
-
-CONFIG = {
-    "max_queues_per_scan": max(1, min(20, int(os.environ.get("MAX_QUEUES_PER_SCAN", "3")))),
-    "hydra_url": fixed_url(os.environ.get("HYDRA_URL", "")),
-    "hydra_key": os.environ.get("HYDRA_API_KEY", ""),
-    "sab_url": fixed_url(os.environ.get("SAB_URL", "")),
-    "sab_key": os.environ.get("SAB_API_KEY", ""),
-    "pushover_user": os.environ.get("PUSHOVER_USER_KEY", ""),
-    "pushover_key": os.environ.get("PUSHOVER_APP_TOKEN", ""),
-    "notification_types": set(x.strip() for x in os.environ.get("NOTIFY_EVENTS", "found,completed,failed").split(",") if x.strip()),
-}
+settings = SettingsFile(str(Path(DATA) / "config.json"))
+CONFIG = settings.data
 store = Store(str(Path(DATA) / "nzbwatch.sqlite3"))
 engine = Engine(store, CONFIG)
 
@@ -104,7 +90,9 @@ class WatchIn(BaseModel):
     max_mb: float | None = Field(default=None, ge=0, le=10000000)
     max_age_days: int | None = Field(default=None, ge=0, le=20000)
     max_grabs: int = Field(default=1, ge=0, le=10000)
-    poll_minutes: int = Field(default=30, ge=5, le=10080)
+    poll_minutes: int = Field(default=0, ge=0, le=10080)  # 0 uses global scan interval
+    broad_search: bool = True
+    resolution_mode: str = "inherit"
 
     @field_validator("name", "query")
     @classmethod
@@ -125,6 +113,20 @@ class WatchIn(BaseModel):
     def valid_match(cls, v):
         if v not in ("all", "any", "phrase"):
             raise ValueError("Invalid match mode")
+        return v
+
+    @field_validator("resolution_mode")
+    @classmethod
+    def valid_resolution_mode(cls, v):
+        if v not in ("inherit", "off", "on"):
+            raise ValueError("Invalid resolution mode")
+        return v
+
+    @field_validator("poll_minutes")
+    @classmethod
+    def valid_interval(cls, v):
+        if v != 0 and v < 5:
+            raise ValueError("Interval must be 0 (global) or at least 5 minutes")
         return v
 
     @field_validator("categories")
@@ -192,6 +194,73 @@ async def state(request: Request):
         "pushover": bool(CONFIG["pushover_user"] and CONFIG["pushover_key"]),
         "notify_events": sorted(CONFIG["notification_types"]),
     }, "time": now()}
+
+
+class SettingsIn(BaseModel):
+    hydra_url: str = Field(max_length=500)
+    sab_url: str = Field(max_length=500)
+    # null = keep existing; empty string = explicitly clear
+    hydra_key: str | None = Field(default=None, max_length=512)
+    sab_key: str | None = Field(default=None, max_length=512)
+    pushover_key: str | None = Field(default=None, max_length=512)
+    pushover_user: str | None = Field(default=None, max_length=512)
+    notification_types: list[str]
+    scan_interval_minutes: int = Field(ge=5, le=10080)
+    max_queues_per_scan: int = Field(ge=1, le=20)
+    clean_search_terms: bool
+    strip_release_groups: bool
+    resolution_enabled: bool
+    resolution_order: list[str]
+    fallback_min_resolution: str
+    allow_unknown_resolution: bool
+    dedupe_across_resolutions: bool
+
+    @field_validator("notification_types")
+    @classmethod
+    def validate_notify(cls, v):
+        if len(v) != len(set(v)) or any(x not in NOTIFY for x in v):
+            raise ValueError("Invalid notification types")
+        return v
+
+    @field_validator("resolution_order")
+    @classmethod
+    def validate_resolutions(cls, v):
+        if not v or len(v) != len(set(v)) or any(x not in RESOLUTIONS for x in v):
+            raise ValueError("Resolution order must contain unique known resolutions")
+        return v
+
+
+@app.get("/api/settings")
+async def get_settings(request: Request):
+    require(request)
+    return settings.public()
+
+
+@app.put("/api/settings")
+async def put_settings(request: Request, data: SettingsIn):
+    require(request, True)
+    if engine.lock.locked():
+        raise HTTPException(409, "Scan underway; save settings once the current scan finishes")
+    old_interval = CONFIG["scan_interval_minutes"]
+    try:
+        result = settings.update(data.model_dump())
+    except (ValueError, OSError) as ex:
+        raise HTTPException(422, safe_error(ex))
+    if old_interval != CONFIG["scan_interval_minutes"]:
+        # Update inherited timers without touching explicit per-watch intervals.
+        with store.conn() as db:
+            from .core import iso_after
+            db.execute("UPDATE watches SET next_run=? WHERE enabled=1 AND poll_minutes=0", (iso_after(CONFIG["scan_interval_minutes"]),))
+    store.log("config", "Updated application settings")
+    return result
+
+
+@app.get("/api/query-preview")
+async def query_preview(request: Request, q: str = ""):
+    require(request)
+    if len(q) > 250:
+        raise HTTPException(422, "Query too long")
+    return {"original": q, "search": search_query({"query": q, "broad_search": True}, CONFIG), "resolution": parse_resolution(q)}
 
 
 @app.post("/api/watches", status_code=201)

@@ -1,5 +1,5 @@
 'use strict';
-let csrf = '', currentView = 'overview', state = null, refreshPending = false, toastTimer = null;
+let csrf = '', currentView = 'overview', state = null, refreshPending = false, toastTimer = null, settingsData = null, previewRequest = 0;
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtTime = s => { if (!s) return 'Never'; const d = new Date(s); return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); };
@@ -25,7 +25,7 @@ async function initialize(){
   setInterval(()=>{if(!$('application').classList.contains('hidden')) refresh().catch(()=>{});},15000);
 }
 async function refresh(){if(refreshPending)return;refreshPending=true;try{state=await api('/api/state');render();$('side-update').textContent=`Updated ${fmtTime(state.time)}`;}catch(e){if(e.message!=='Login required')toast('Refresh failed: '+e.message,true);}finally{refreshPending=false;}}
-function go(view){currentView=view;for(const v of ['overview','watches','activity','settings'])$('view-'+v).classList.toggle('hidden',v!==view);document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('page-title').textContent=({overview:'Overview',watches:'Watchlist',activity:'Activity',settings:'Connections'})[view];render();}
+function go(view){currentView=view;for(const v of ['overview','watches','activity','settings'])$('view-'+v).classList.toggle('hidden',v!==view);document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('page-title').textContent=({overview:'Overview',watches:'Watchlist',activity:'Activity',settings:'Settings'})[view];render();if(view==='settings')loadSettings().catch(handleError);}
 function render(){if(!state)return;const c=state.counts;$('stat-active').textContent=c.active;$('stat-found').textContent=c.found;$('stat-queued').textContent=c.queued;$('stat-completed').textContent=c.completed;$('nav-count').textContent=c.watches;renderOverview();renderWatches();renderActivity();renderSettings();}
 function empty(text){return `<div class="empty"><div class="empty-symbol">◇</div>${esc(text)}</div>`;}
 function renderOverview(){
@@ -35,14 +35,56 @@ function renderOverview(){
 function eventHtml(e){const sym=({found:'✳',queued:'⇣',completed:'✓',failed_download:'!',error:'!',warning:'!',auth:'♙',search:'◎',config:'⚙'})[e.type]||'·';return `<div class="event-row"><div class="event-bullet ${e.type==='error'?'error':''}">${sym}</div><div class="event-text"><div>${esc(e.message)}</div><small>${esc(e.type)} &nbsp; · &nbsp; ${fmtTime(e.created_at)}</small></div></div>`;}
 function renderWatches(){const filter=$('filter-watches').value.toLowerCase();const watches=state.watches.filter(w=>(w.name+' '+w.query).toLowerCase().includes(filter));$('watchlist').innerHTML=watches.length?watches.map(w=>`
   <article class="panel watch-card"><div class="watch-card-top"><div><h3>${esc(w.name)}</h3><div class="query">${esc(w.query)}</div></div><span class="pill ${watchStatus(w)[1]}">${watchStatus(w)[0]}</span></div>
-  <div class="meta"><span>${w.mode==='auto'?'⇣ Auto-download':'✧ Notify only'}</span><span>↻ ${esc(w.poll_minutes)} min</span><span>${w.max_grabs===0?'Unlimited grabs':esc(w.grab_count)+' / '+esc(w.max_grabs)+' grabs'}</span>${w.sab_category?'<span>Category: '+esc(w.sab_category)+'</span>':''}</div>
+  <div class="meta"><span>${w.mode==='auto'?'⇣ Auto-download':'✧ Notify only'}</span><span>↻ ${w.poll_minutes?esc(w.poll_minutes)+' min':'Global interval'}</span><span>${w.max_grabs===0?'Unlimited grabs':esc(w.grab_count)+' / '+esc(w.max_grabs)+' grabs'}</span>${w.sab_category?'<span>Category: '+esc(w.sab_category)+'</span>':''}</div>
   <div class="last">Last check: ${fmtTime(w.last_checked)} &nbsp;·&nbsp; Next check: ${w.enabled?fmtTime(w.next_run):'Paused'}</div>${w.last_error?'<div class="last err">⚠ '+esc(w.last_error)+'</div>':''}
   <div class="card-actions"><button class="btn secondary tiny" data-check="${w.id}" ${!w.enabled?'disabled':''}>↻ Check now</button><button class="btn secondary tiny" data-edit="${w.id}">Edit</button><button class="btn danger tiny" data-delete="${w.id}">Delete</button></div></article>`).join(''):empty(filter?'No watches match that filter.':'No watches configured yet. Use “Add watch” to get started.');}
-function renderActivity(){const status=$('status-filter').value;const matches=state.matches.filter(m=>!status||m.status===status);$('results-body').innerHTML=matches.length?matches.map(m=>`<tr><td>${esc(m.title)}${m.note?'<div class="muted-sub">'+esc(m.note)+'</div>':''}${m.nzo_id?'<div class="muted-sub">'+esc(m.nzo_id)+'</div>':''}</td><td>${esc(m.watch_name)}</td><td>${fmtSize(m.size_bytes)}</td><td><span class="pill ${esc(m.status)}">${esc(formatStatus(m.status))}</span></td><td>${fmtTime(m.found_at)}</td><td>${m.status==='found'||m.status==='failed'?`<button class="btn secondary tiny" data-queue="${m.id}">Queue</button>`:''}</td></tr>`).join(''):`<tr><td colspan="6">${empty('No matching results yet.')}</td></tr>`;$('event-log').innerHTML=state.events.length?state.events.map(eventHtml).join(''):empty('No events yet.');}
-function renderSettings(){for(const provider of ['hydra','sab','pushover']){const status=$('service-'+provider).querySelector('.service-status');status.innerHTML=state.integrations[provider]?'<span class="live-dot"></span> Credentials configured':'<span style="color:#ffabac">●</span> Not configured';}$('notification-types').textContent='Configured notification events: '+(state.integrations.notify_events.join(', ')||'none');}
-function openWatch(w=null){$('watch-form').reset();$('watch-id').value=w?.id||'';$('modal-title').textContent=w?'Edit watch':'New watch';const defaults={name:'',query:'',enabled:1,mode:'auto',match_mode:'all',required_words:'',excluded_words:'',categories:'',sab_category:'',min_mb:'',max_mb:'',max_age_days:'',max_grabs:1,poll_minutes:30};const data={...defaults,...(w||{})};for(const [key,val] of Object.entries(data)){const field=$('watch-form').elements.namedItem(key);if(!field)continue;if(field.type==='checkbox')field.checked=Boolean(val);else field.value=val===null?'':val;}$('watch-modal').classList.remove('hidden');document.body.style.overflow='hidden';$('watch-name').focus();}
+function renderActivity(){const status=$('status-filter').value;const matches=state.matches.filter(m=>!status||m.status===status);$('results-body').innerHTML=matches.length?matches.map(m=>`<tr><td>${esc(m.title)}${m.note?'<div class="muted-sub">'+esc(m.note)+'</div>':''}${m.nzo_id?'<div class="muted-sub">'+esc(m.nzo_id)+'</div>':''}</td><td>${esc(m.watch_name)}</td><td>${fmtSize(m.size_bytes)}${m.resolution?'<div class="muted-sub">'+esc(m.resolution)+'</div>':''}</td><td><span class="pill ${esc(m.status)}">${esc(formatStatus(m.status))}</span></td><td>${fmtTime(m.found_at)}</td><td>${m.status==='found'||m.status==='failed'?`<button class="btn secondary tiny" data-queue="${m.id}">Queue</button>`:''}</td></tr>`).join(''):`<tr><td colspan="6">${empty('No matching results yet.')}</td></tr>`;$('event-log').innerHTML=state.events.length?state.events.map(eventHtml).join(''):empty('No events yet.');}
+function renderSettings(){for(const provider of ['hydra','sab','pushover']){const status=$('service-'+provider).querySelector('.service-status');status.innerHTML=state.integrations[provider]?'<span class="live-dot"></span> Credentials configured':'<span style="color:#ffabac">●</span> Not configured';}$('notification-types').textContent='Active notifications: '+(state.integrations.notify_events.join(', ')||'none');}
+function openWatch(w=null){$('watch-form').reset();$('watch-id').value=w?.id||'';$('modal-title').textContent=w?'Edit watch':'New watch';const defaults={name:'',query:'',enabled:1,mode:'auto',match_mode:'all',required_words:'',excluded_words:'',categories:'',sab_category:'',min_mb:'',max_mb:'',max_age_days:'',max_grabs:1,poll_minutes:0,broad_search:true,resolution_mode:'inherit'};const data={...defaults,...(w||{})};for(const [key,val] of Object.entries(data)){const field=$('watch-form').elements.namedItem(key);if(!field)continue;if(field.type==='checkbox')field.checked=Boolean(val);else field.value=val===null?'':val;}$('watch-modal').classList.remove('hidden');document.body.style.overflow='hidden';$('watch-name').focus();updatePreview();}
 function closeWatch(){$('watch-modal').classList.add('hidden');document.body.style.overflow='';}
-function watchPayload(){const f=$('watch-form');const obj={};for(const name of ['name','query','mode','match_mode','required_words','excluded_words','categories','sab_category'])obj[name]=f.elements.namedItem(name).value.trim();for(const name of ['min_mb','max_mb','max_age_days']){const str=f.elements.namedItem(name).value;obj[name]=str===''?null:Number(str);}for(const name of ['max_grabs','poll_minutes'])obj[name]=Number(f.elements.namedItem(name).value);obj.enabled=$('watch-enabled').checked;return obj;}
+function watchPayload(){const f=$('watch-form');const obj={};for(const name of ['name','query','mode','match_mode','required_words','excluded_words','categories','sab_category','resolution_mode'])obj[name]=f.elements.namedItem(name).value.trim();for(const name of ['min_mb','max_mb','max_age_days']){const str=f.elements.namedItem(name).value;obj[name]=str===''?null:Number(str);}for(const name of ['max_grabs','poll_minutes'])obj[name]=Number(f.elements.namedItem(name).value);obj.enabled=$('watch-enabled').checked;obj.broad_search=$('watch-broad').checked;return obj;}
+const secretKeys=['hydra_key','sab_key','pushover_key','pushover_user'];
+async function loadSettings(){
+  settingsData=await api('/api/settings');
+  const f=$('settings-form');
+  for(const [key,val] of Object.entries(settingsData)){
+    const el=f.elements.namedItem(key);if(!el)continue;
+    if(el.type==='checkbox')el.checked=Boolean(val);
+    else if(key==='resolution_order')el.value=val.join(',');
+    else el.value=val;
+  }
+  for(const key of secretKeys){
+    const el=f.elements.namedItem(key);el.value='';
+    f.elements.namedItem('clear_'+key).checked=false;
+    el.placeholder=settingsData.configured_secrets[key]?'Saved — blank keeps existing':'Not configured';
+  }
+  document.querySelectorAll('#notify-checkboxes input').forEach(el=>el.checked=settingsData.notification_types.includes(el.value));
+}
+function settingsPayload(){
+  const f=$('settings-form');
+  const o={};
+  for(const k of ['hydra_url','sab_url','fallback_min_resolution'])o[k]=f.elements.namedItem(k).value.trim();
+  for(const k of ['scan_interval_minutes','max_queues_per_scan'])o[k]=Number(f.elements.namedItem(k).value);
+  for(const k of ['clean_search_terms','strip_release_groups','resolution_enabled','allow_unknown_resolution','dedupe_across_resolutions'])o[k]=f.elements.namedItem(k).checked;
+  o.resolution_order=f.elements.namedItem('resolution_order').value.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+  o.notification_types=[...document.querySelectorAll('#notify-checkboxes input:checked')].map(x=>x.value);
+  for(const k of secretKeys){
+    const value=f.elements.namedItem(k).value.trim();
+    o[k]=f.elements.namedItem('clear_'+k).checked?'':(value||null);
+  }
+  return o;
+}
+async function updatePreview(){
+  const id=++previewRequest;
+  const query=$('watch-query').value;
+  if(!query.trim()){$('query-preview').textContent='';return;}
+  try {
+    const r=await api('/api/query-preview?q='+encodeURIComponent(query));
+    if(id!==previewRequest)return;
+    $('query-preview').textContent='Global broad-search preview: '+r.search;
+  }catch{}
+}
+
 function handleError(e){toast(e.message||String(e),true);}
 window.addEventListener('DOMContentLoaded',()=>{
   $('login-form').addEventListener('submit',async e=>{e.preventDefault();$('login-error').textContent='';try{const r=await api('/api/login',{method:'POST',body:{password:$('password').value}});csrf=r.csrf;showApp();go('overview');await refresh();}catch(ex){$('login-error').textContent=ex.message;}});
@@ -52,11 +94,17 @@ window.addEventListener('DOMContentLoaded',()=>{
   $('add-watch').addEventListener('click',()=>openWatch());$('close-modal').addEventListener('click',closeWatch);$('cancel-modal').addEventListener('click',closeWatch);
   $('watch-modal').addEventListener('click',e=>{if(e.target===$('watch-modal'))closeWatch();});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('watch-modal').classList.contains('hidden'))closeWatch();});
   $('watch-form').addEventListener('submit',async e=>{e.preventDefault();const id=$('watch-id').value;const btn=$('save-watch');btn.disabled=true;try{await api(id?`/api/watches/${id}`:'/api/watches',{method:id?'PUT':'POST',body:watchPayload()});closeWatch();toast(id?'Watch updated':'Watch created');await refresh();}catch(ex){handleError(ex)}finally{btn.disabled=false;}});
-  $('filter-watches').addEventListener('input',renderWatches);$('status-filter').addEventListener('change',renderActivity);
+  $('watch-query').addEventListener('input',updatePreview);$('filter-watches').addEventListener('input',renderWatches);$('status-filter').addEventListener('change',renderActivity);
   $('watchlist').addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;const id=Number(b.dataset.edit||b.dataset.delete||b.dataset.check);if(b.dataset.edit){const w=state.watches.find(x=>x.id===id);if(w)openWatch(w);}else if(b.dataset.delete){const w=state.watches.find(x=>x.id===id);if(!confirm(`Delete “${w?.name||id}” and its saved matches? This cannot be undone.`))return;try{await api(`/api/watches/${id}`,{method:'DELETE'});toast('Watch deleted');await refresh();}catch(ex){handleError(ex);}}else if(b.dataset.check){try{await api(`/api/watches/${id}/check`,{method:'POST'});toast('Scan started. Results will appear in Activity.');}catch(ex){handleError(ex);}}});
   $('results-body').addEventListener('click',async e=>{const id=e.target.closest('[data-queue]')?.dataset.queue;if(!id)return;try{const r=await api(`/api/matches/${id}/queue`,{method:'POST'});toast('Queue result: '+r.result);await refresh();}catch(ex){handleError(ex);}});
   $('check-all').addEventListener('click',async()=>{try{const r=await api('/api/check-all',{method:'POST'});toast(`Scheduled ${r.count} watch checks`);}catch(ex){handleError(ex);}});
   document.querySelectorAll('[data-test]').forEach(b=>b.addEventListener('click',async()=>{b.disabled=true;try{const r=await api('/api/test/'+b.dataset.test,{method:'POST'});toast(r.message);}catch(ex){handleError(ex)}finally{b.disabled=false;}}));
+  $('settings-form').addEventListener('submit',async e=>{
+    e.preventDefault();
+    const btn=$('save-settings');btn.disabled=true;
+    try{await api('/api/settings',{method:'PUT',body:settingsPayload()});toast('Settings saved and applied without restart');await loadSettings();await refresh();}
+    catch(ex){handleError(ex)}finally{btn.disabled=false;}
+  });
   $('export-json').addEventListener('click',async()=>{try{const res=await fetch('/api/export',{credentials:'same-origin'});if(!res.ok)throw new Error('Export failed');const blob=await res.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='nzbwatch-watchlist.json';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}catch(ex){handleError(ex);}});
   $('import-json').addEventListener('click',()=>$('import-file').click());$('import-file').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;try{const json=JSON.parse(await file.text());const r=await api('/api/import',{method:'POST',body:json});toast(`Imported ${r.added} watches`);await refresh();}catch(ex){handleError(ex)}finally{e.target.value='';}});
   initialize();

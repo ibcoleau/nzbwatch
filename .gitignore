@@ -7,3 +7,8 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .venv/
+
+config.json
+*.sqlite3-wal
+*.sqlite3-shm
+SETTINGS_PREVIEW.png
