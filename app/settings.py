@@ -24,6 +24,7 @@ DEFAULTS = {
     "fallback_min_resolution": "720p",
     "allow_unknown_resolution": False,
     "dedupe_across_resolutions": True,
+    "watchlist_columns": 2,  # 1 = full-width rows, 2 = two-column cards
 }
 
 
@@ -60,6 +61,8 @@ def verify(data: dict) -> dict:
         raise ValueError("Scan interval must be 5–10080 minutes")
     if not 1 <= out["max_queues_per_scan"] <= 20:
         raise ValueError("Max queues per scan must be 1–20")
+    if type(out["watchlist_columns"]) is not int or out["watchlist_columns"] not in (1, 2):
+        raise ValueError("Watchlist columns must be 1 or 2")
     for key in ("clean_search_terms", "strip_release_groups", "resolution_enabled", "allow_unknown_resolution", "dedupe_across_resolutions"):
         if type(out[key]) is not bool:
             raise ValueError(f"{key} must be true or false")

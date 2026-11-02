@@ -29,11 +29,33 @@
         <div class="stats"><div class="stat"><div class="stat-label">ACTIVE WATCHES <span>◎</span></div><div class="stat-number" id="stat-active">—</div><div class="stat-foot">Monitoring on schedule</div></div><div class="stat"><div class="stat-label">NEW MATCHES <span>✳</span></div><div class="stat-number" id="stat-found">—</div><div class="stat-foot">Ready for review</div></div><div class="stat"><div class="stat-label">IN SAB QUEUE <span>⇣</span></div><div class="stat-number" id="stat-queued">—</div><div class="stat-foot">Queued / in progress</div></div><div class="stat"><div class="stat-label">COMPLETED <span>✓</span></div><div class="stat-number" id="stat-completed">—</div><div class="stat-foot">Finished downloads</div></div></div>
         <div class="split"><section class="panel"><div class="section-head"><div><h3>Your watchlist</h3><p>Recently configured searches</p></div><button class="link-btn" data-goto="watches">View all →</button></div><div id="overview-watches"></div></section><section class="panel"><div class="section-head"><div><h3>Recent events</h3><p>Latest activity from the scheduler</p></div><button class="link-btn" data-goto="activity">Full history →</button></div><div id="overview-events"></div></section></div>
       </section>
-      <section id="view-watches" class="view hidden"><div class="section-head page-section"><div><h2>Search watches</h2><p>Create and fine-tune automated searches. Each watch can inherit the global scan interval and resolution preferences or override them.</p></div><input id="filter-watches" class="search-input" placeholder="Filter watches…" aria-label="Filter watchlist"></div><div id="watchlist" class="watch-grid"></div></section>
+      <section id="view-watches" class="view hidden">
+        <div class="section-head page-section"><div><h2>Search watches</h2><p>Create and fine-tune automated searches. Change the watchlist layout in Settings → Appearance.</p></div><input id="filter-watches" class="search-input" placeholder="Filter watches…" aria-label="Filter watchlist"></div>
+        <section class="watch-group" aria-labelledby="active-watch-heading">
+          <div class="watch-group-heading"><div><h3 id="active-watch-heading">Active &amp; paused <span id="active-watch-count" class="watch-section-count">0</span></h3><p>Watches that are monitoring or have been paused manually</p></div></div>
+          <div id="watchlist" class="watch-grid"></div>
+        </section>
+        <section class="watch-group completed-watch-group" aria-labelledby="completed-watch-heading">
+          <div class="watch-group-heading"><div><h3 id="completed-watch-heading">Completed <span id="completed-watch-count" class="watch-section-count">0</span></h3><p>One-off and limited watches that have reached their queue limit. SABnzbd download progress remains in Activity.</p></div></div>
+          <div id="completed-watchlist" class="watch-grid"></div>
+        </section>
+      </section>
       <section id="view-activity" class="view hidden"><div class="section-head page-section"><div><h2>Results & downloads</h2><p>History is retained across restarts. Each matched title is tracked once per watch.</p></div><select id="status-filter" class="compact-select" aria-label="Filter by status"><option value="">All statuses</option><option value="found">Found</option><option value="queued">Queued</option><option value="completed">Completed</option><option value="failed">Queue failed</option><option value="failed_download">Download failed</option><option value="skipped">Duplicate</option></select></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="results-body"></tbody></table></div></div><div class="panel activity-log"><div class="section-head"><div><h3>Event log</h3><p>Last 80 system events</p></div></div><div id="event-log"></div></div></section>
       <section id="view-settings" class="view hidden">
         <div class="section-head page-section"><div><h2>Settings</h2><p>Changes save to <code>/data/config.json</code> and take effect without restarting NZBWatch.</p></div><span class="pill">LIVE CONFIGURATION</span></div>
         <form id="settings-form">
+          <div class="panel settings-panel">
+            <div class="section-head"><div><h3>Appearance</h3><p>Choose how watches are arranged in the Watchlist. This preference is shared across devices and saved in /data/config.json.</p></div></div>
+            <div class="form-grid settings-grid">
+              <div class="field"><label for="settings-watchlist-columns">Watchlist columns</label>
+                <select name="watchlist_columns" id="settings-watchlist-columns">
+                  <option value="1">1 column — one watch per row</option>
+                  <option value="2">2 columns — compact cards</option>
+                </select>
+                <small>Smaller screens automatically use a single column.</small>
+              </div>
+            </div>
+          </div>
           <div class="panel settings-panel">
             <div class="section-head"><div><h3>Integrations</h3><p>Leave an API key blank to retain the saved value; use Clear to remove it.</p></div></div>
             <div class="form-grid settings-grid">

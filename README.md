@@ -1,13 +1,13 @@
-# NZBWatch v0.2.2
+# NZBWatch v0.2.3
 
-**Updated 2 November 2026.** Fixes empty or stale API keys embedded in Hydra NZB download URLs and displays actual Newznab error descriptions (with credentials redacted).
+**Updated 2 November 2026.** Adds one-/two-column Watchlist layout and a separate Completed section. Includes the v0.2.2 Hydra download fixes.
 
 
 A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation dashboard. Includes Pushover notifications. Designed for a **single Docker container and a persistent Docker volume**; no Node, Redis, or external database is needed.
 
 ## Features
 
-- Edit/search/enable/disable/delete watch rules in the browser.
+- Edit/search/enable/disable/delete watch rules in the browser. Choose **1 or 2 Watchlist columns** in Settings → Appearance and keep finished watches in a separate **Completed** section.
 - Newznab-compatible NZBHydra2 search, using the documented `/api?t=search` interface.
 - Per-watch search rules, phrase filters, categories, size/age limits, auto-download/notify-only, maximum grabs, optional per-watch interval or inherited global interval, broad-search control and resolution-filtering override.
 - Editable **Settings** page for Hydra/SABnzbd URLs and API keys, Pushover token/user, notification events, global check interval, max queues, search cleaning, resolution priority and fallback minimum. Saved to `/data/config.json` and applied live without restarting.
@@ -19,7 +19,7 @@ A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation das
 - SQLite persistence with separate watch rules, matched results, submitted titles, and a rolling event log. Watch rules export/import as JSON.
 - Duplicate prevention by normalized release title, plus optional (enabled by default) deduplication of video releases across different resolutions and watch rules using cleaned content identity.
 - HTTPS-ready cookie sessions, CSRF on writes, in-memory login throttling, no API keys exposed to browsers, and no external frontend dependencies.
-- One-off watches **automatically pause** after reaching their configured number of successfully queued items. When `max_grabs=0`, the watch stays enabled. A per-scan auto-queue cap of 3 avoids bulk additions from broad searches (configurable in Settings).
+- One-off watches **automatically stop monitoring and appear under Completed** after reaching their configured number of successfully queued items. When `max_grabs=0`, the watch stays enabled. A per-scan auto-queue cap of 3 avoids bulk additions from broad searches (configurable in Settings).
 
 ## v0.2.2 download hotfix
 
@@ -37,7 +37,7 @@ A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation das
 
 ## Upgrading an existing Unraid container
 
-See **[UPGRADE_UNRAID.md](UPGRADE_UNRAID.md)**. You must retain the existing `/data` mapping, and update the container image to `virtike/nzbwatch:0.2.2` after publishing the `v0.2.2` Git tag. Take an appdata backup before upgrading. The SQLite database is migrated in place and secrets are imported from existing env vars on first startup.
+See **[UPGRADE_UNRAID.md](UPGRADE_UNRAID.md)**. You must retain the existing `/data` mapping, and update the container image to `virtike/nzbwatch:0.2.3` after publishing the `v0.2.3` Git tag. Take an appdata backup before upgrading. The SQLite database is migrated in place and secrets are imported from existing env vars on first startup.
 
 ## Quick start (Docker Compose)
 
@@ -149,3 +149,11 @@ python -m pytest -q
 See [PUBLISHING.md](PUBLISHING.md) for setting up the GitHub repository,
 Docker Hub access token, automated test and release workflows, and the
 `compose.deploy.yaml` file for deploying published images without building locally.
+
+## v0.2.3 — Watchlist presentation and completed watches
+
+- **Settings → Appearance → Watchlist columns:** choose 1 (one full-width card per row) or 2 (two-column cards). The preference is stored in `/data/config.json`, immediately applied to the running web UI, and shared between browsers. Narrow windows automatically collapse to one column. Existing configurations default to two columns.
+- **Watchlist → Active & paused / Completed:** watches that have reached their configured grab limit are shown in the separate Completed section instead of mixed in with active/paused watches. Completed watches remain editable and deletable, and their matches remain available in Activity.
+- **Overview:** Recent watches exclude completed ones; the Watchlist navigation counter shows active/paused watches.
+- Completion means the watch's maximum number of successful queue submissions has been reached, **not** that SABnzbd has finished downloading. Actual download completion is tracked in Activity.
+- No database migration or storage-path change. `/data/nzbwatch.sqlite3` and `/data/config.json` are preserved.

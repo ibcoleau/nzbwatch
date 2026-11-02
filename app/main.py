@@ -188,7 +188,8 @@ async def logout(request: Request):
 @app.get("/api/state")
 async def state(request: Request):
     require(request)
-    return {"watches": store.watches(), **store.recent(), "integrations": {
+    return {"watches": store.watches(), **store.recent(),
+            "preferences": {"watchlist_columns": CONFIG["watchlist_columns"]}, "integrations": {
         "hydra": bool(CONFIG["hydra_url"] and CONFIG["hydra_key"]),
         "sab": bool(CONFIG["sab_url"] and CONFIG["sab_key"]),
         "pushover": bool(CONFIG["pushover_user"] and CONFIG["pushover_key"]),
@@ -214,6 +215,7 @@ class SettingsIn(BaseModel):
     fallback_min_resolution: str
     allow_unknown_resolution: bool
     dedupe_across_resolutions: bool
+    watchlist_columns: int = Field(default=2, ge=1, le=2)
 
     @field_validator("notification_types")
     @classmethod
@@ -239,8 +241,13 @@ async def get_settings(request: Request):
 @app.put("/api/settings")
 async def put_settings(request: Request, data: SettingsIn):
     require(request, True)
+    submitted = data.model_dump()
     if engine.lock.locked():
-        raise HTTPException(409, "Scan underway; save settings once the current scan finishes")
+        # Presentation-only changes can safely be saved during a scan.
+        active_changes = {key for key, value in submitted.items()
+                          if value is not None and value != CONFIG.get(key)}
+        if active_changes - {"watchlist_columns"}:
+            raise HTTPException(409, "Scan underway; save settings once the current scan finishes")
     old_interval = CONFIG["scan_interval_minutes"]
     try:
         result = settings.update(data.model_dump())
