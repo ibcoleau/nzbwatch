@@ -47,7 +47,7 @@ def test_nzb_formats_xml_gzip_zip_rar_and_rejections():
     assert nzb_upload_info(b'Rar!\x1a\x07\x00more-bytes')[0] == 'watch.nzb.rar'
     for data,typ,label in ((b'<html><body>Login</body></html>', 'text/html','HTML'),
                            (b'{"error":"login"}', 'application/json','JSON'),
-                           (b'<error description="invalid key"/>','text/xml','ERROR'),
+                           (b'<error description="invalid key"/>','text/xml','error'),
                            (b'<rss></rss>', 'application/xml','RSS'),
                            (b'', '', 'empty')):
         with pytest.raises(ValueError, match=label):

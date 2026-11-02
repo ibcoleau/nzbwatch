@@ -1,6 +1,6 @@
-# NZBWatch v0.2.1
+# NZBWatch v0.2.2
 
-**Updated 2 November 2026.** Hotfix for NZBHydra2 download URLs and NZB payload detection, retaining web-managed settings and quality preferences.
+**Updated 2 November 2026.** Fixes empty or stale API keys embedded in Hydra NZB download URLs and displays actual Newznab error descriptions (with credentials redacted).
 
 
 A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation dashboard. Includes Pushover notifications. Designed for a **single Docker container and a persistent Docker volume**; no Node, Redis, or external database is needed.
@@ -21,7 +21,13 @@ A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation das
 - HTTPS-ready cookie sessions, CSRF on writes, in-memory login throttling, no API keys exposed to browsers, and no external frontend dependencies.
 - One-off watches **automatically pause** after reaching their configured number of successfully queued items. When `max_grabs=0`, the watch stays enabled. A per-scan auto-queue cap of 3 avoids bulk additions from broad searches (configurable in Settings).
 
-## v0.2.1 download hotfix
+## v0.2.2 download hotfix
+
+- NZB download links may contain `apikey=` with a blank or stale value even while searches work. NZBWatch now replaces it with the current key from `/data/config.json` for every Hydra download, including redirects passed to SABnzbd.
+- NZBHydra/Newznab `<error code="…" description="…"/>` payloads are shown as a short, sanitised reason in Activity, rather than only “Hydra returned ERROR”. This distinguishes missing/invalid credentials, missing search results, and indexer limits; an actual indexer-side problem still needs fixing upstream.
+- Removed the unnecessary Overview introductory heading/tagline. Existing database and settings unchanged.
+
+### Previous improvements (v0.2.1)
 
 - NZBHydra's `<enclosure url="...">` is now preferred over an RSS `<link>` that may refer to an HTML/details page.
 - Hydra payload validation now recognises XML NZBs with long declarations/comments, plus gzip, ZIP and RAR archives accepted by SABnzbd.
@@ -31,7 +37,7 @@ A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation das
 
 ## Upgrading an existing Unraid container
 
-See **[UPGRADE_UNRAID.md](UPGRADE_UNRAID.md)**. You must retain the existing `/data` mapping, and update the container image to `virtike/nzbwatch:0.2.1` after publishing the `v0.2.1` Git tag. Take an appdata backup before upgrading. The SQLite database is migrated in place and secrets are imported from existing env vars on first startup.
+See **[UPGRADE_UNRAID.md](UPGRADE_UNRAID.md)**. You must retain the existing `/data` mapping, and update the container image to `virtike/nzbwatch:0.2.2` after publishing the `v0.2.2` Git tag. Take an appdata backup before upgrading. The SQLite database is migrated in place and secrets are imported from existing env vars on first startup.
 
 ## Quick start (Docker Compose)
 

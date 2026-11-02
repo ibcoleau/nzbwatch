@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -205,7 +205,41 @@ def parse_rss(data: bytes) -> list[dict]:
     return items
 
 
-def nzb_upload_info(content: bytes, content_type: str = "") -> tuple[str, str]:
+
+def authenticated_hydra_url(base_url: str, result_link: str, api_key: str) -> str:
+    """Return a same-origin NZB URL with the *current* Hydra API key.
+
+    Hydra can return RSS enclosure URLs with empty or old `apikey` query
+    parameters.  Looking only for the presence of the parameter mistakenly
+    used those values instead of the current configured key.
+    """
+    url = urljoin(base_url.rstrip("/") + "/", result_link)
+    source, expected = urlsplit(url), urlsplit(base_url)
+    if (source.scheme not in ("http", "https") or
+        source.hostname != expected.hostname or source.port != expected.port or
+        source.username is not None or source.password is not None):
+        raise ValueError("NZB link is outside configured NZBHydra2 host")
+    # Reject lookalike domains and avoid sending the Hydra key to foreign hosts.
+    query = [(k, v) for k, v in parse_qsl(source.query, keep_blank_values=True)
+             if k.lower() != "apikey"]
+    query.append(("apikey", api_key))
+    return urlunsplit((source.scheme, source.netloc, source.path, urlencode(query), ""))
+
+
+def safe_upstream_description(message: str, secrets: tuple[str, ...] = ()) -> str:
+    """Display a useful API error while masking credentials and request URLs."""
+    text = " ".join(str(message).split())[:800]
+    # Mask key-value pairs and URLs: upstream errors can echo their request.
+    text = re.sub(r"(?i)\b(apikey|api_key|token|password|api-key|access_token)\b\s*[:=]\s*[^\s&,;<>\"']+",
+                  r"\1=[redacted]", text)
+    text = re.sub(r"https?://[^\s<>\"']+", "[URL redacted]", text, flags=re.I)
+    for value in secrets:
+        if value:
+            text = text.replace(value, "[redacted]")
+    return text[:280] or "No reason provided"
+
+
+def nzb_upload_info(content: bytes, content_type: str = "", *, secrets: tuple[str, ...] = ()) -> tuple[str, str]:
     """Validate a Hydra download response without mistaking an HTML page for NZB.
 
     SABnzbd accepts regular NZBs and supported compressed NZB archives. The
@@ -228,7 +262,14 @@ def nzb_upload_info(content: bytes, content_type: str = "") -> tuple[str, str]:
         name = root.tag.rsplit("}", 1)[-1].lower() if isinstance(root.tag, str) else ""
         if name == "nzb":
             return ("watch.nzb", "application/x-nzb")
-        if name in ("html", "error", "rss"):
+        if name == "error":
+            # Newznab errors are HTTP 200 XML, e.g. <error code="100"
+            # description="Incorrect API key"/>. Preserve the actual reason.
+            code = safe_upstream_description(root.get("code", ""), secrets)
+            description = safe_upstream_description(root.get("description") or root.text or "No reason provided", secrets)
+            prefix = f"Hydra NZB download error (code {code})" if root.get("code") else "Hydra NZB download error"
+            raise ValueError(f"{prefix}: {description}")
+        if name in ("html", "rss"):
             raise ValueError(f"Hydra returned {name.upper()} instead of an NZB (check the download link and Hydra API access)")
     mime = content_type.split(";", 1)[0].strip().lower() or "unknown"
     if mime in ("text/html", "application/xhtml+xml") or content.lstrip()[:100].lower().startswith((b"<!doctype html", b"<html")):
@@ -505,17 +546,13 @@ class Engine:
         try:
             if not self.config["sab_url"] or not self.config["sab_key"]:
                 raise RuntimeError("SABnzbd settings are missing")
-            # Hydra-generated URLs normally point to Hydra. Never fetch external indexer hosts.
-            url = urljoin(self.config["hydra_url"] + "/", m["link"])
-            source = urlsplit(url)
-            expected = urlsplit(self.config["hydra_url"])
-            if source.scheme not in ("http", "https") or (source.hostname, source.port) != (expected.hostname, expected.port):
-                raise ValueError("NZB link is outside configured NZBHydra2 host")
+            # Always use the current Hydra API key, even if the RSS download
+            # URL already contains a blank, expired or incorrect key.
+            url = authenticated_hydra_url(self.config["hydra_url"], m["link"], self.config["hydra_key"])
             # Hydra may proxy NZBs directly OR reply with a redirect to its indexer.
             # If it redirects, let SABnzbd request the authenticated Hydra URL itself.
             # Both Hydra and SAB must then be network-reachable from SAB's container.
-            params = {} if "apikey=" in source.query.lower() else {"apikey": self.config["hydra_key"]}
-            async with self.client.stream("GET", url, params=params) as r:
+            async with self.client.stream("GET", url) as r:
                 content_type = r.headers.get("content-type", "")
                 if r.is_redirect:
                     content = None
@@ -534,17 +571,13 @@ class Engine:
             if w["sab_category"]:
                 sab_params["cat"] = w["sab_category"]
             if content is None:
-                # QueryParams encodes URL and credentials for forwarding to SAB. Do
-                # not use the destination of Hydra's redirect, only the original link.
+                # Forward only the authenticated Hydra URL, never a foreign
+                # indexer redirect (and never a stale RSS-provided API key).
                 sab_params["mode"] = "addurl"
-                from urllib.parse import parse_qsl, urlencode, urlunsplit
-                q = dict(parse_qsl(source.query, keep_blank_values=True))
-                q.setdefault("apikey", self.config["hydra_key"])
-                download_url = urlunsplit((source.scheme, source.netloc, source.path, urlencode(q), source.fragment))
-                sab_params["name"] = download_url
+                sab_params["name"] = url
                 res = await self.client.post(self.config["sab_url"] + "/api", params=sab_params)
             else:
-                filename, mime = nzb_upload_info(content, content_type)
+                filename, mime = nzb_upload_info(content, content_type, secrets=(self.config["hydra_key"], self.config["sab_key"]))
                 sab_params["mode"] = "addfile"
                 res = await self.client.post(self.config["sab_url"] + "/api", params=sab_params, files={"nzbfile": (filename, content, mime)})
             res.raise_for_status()
