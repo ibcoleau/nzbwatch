@@ -279,6 +279,25 @@ def nzb_upload_info(content: bytes, content_type: str = "", *, secrets: tuple[st
     raise ValueError(f"Hydra returned an unsupported download format ({mime}); expected NZB/XML, gzip or ZIP")
 
 
+def notification_content(title: str, message: str, kind: str,
+                         watch_name: str = "", privacy: str = "full") -> tuple[str, str]:
+    """Never include release/search data in restricted Pushover levels.
+
+    Level 2 exposes only the explicit watch display name. Level 3 exposes
+    no watch name or filename, regardless of original message text.
+    """
+    if privacy == "full":
+        return title, message
+    labels = {"found": "found a download", "queued": "queued a download",
+              "completed": "completed a download", "failed": "had a download failure"}
+    action = labels.get(kind, "has an update")
+    if privacy == "generic":
+        return "NZBWatch notification", f"NZBWatch {action} for something" if kind == "found" else f"NZBWatch {action}"
+    # watch_only: display name is intentionally visible; release names and raw
+    # search terms are *never* included, even in a summary notification.
+    return "NZBWatch notification", f"NZBWatch {action} for {watch_name}" if watch_name else f"NZBWatch {action}"
+
+
 class Store:
     def __init__(self, path: str):
         self.path = path
@@ -310,7 +329,7 @@ class Store:
                 max_age_days INTEGER, max_grabs INTEGER NOT NULL DEFAULT 1,
                 grab_count INTEGER NOT NULL DEFAULT 0, poll_minutes INTEGER NOT NULL DEFAULT 30,
                 broad_search INTEGER NOT NULL DEFAULT 1, resolution_mode TEXT NOT NULL DEFAULT 'inherit',
-                last_checked TEXT, next_run TEXT, last_error TEXT,
+                last_checked TEXT, next_run TEXT, last_error TEXT, completed_success_at TEXT,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS matches (
@@ -336,6 +355,8 @@ class Store:
                 db.execute("ALTER TABLE watches ADD COLUMN broad_search INTEGER NOT NULL DEFAULT 0")
             if "resolution_mode" not in watch_columns:
                 db.execute("ALTER TABLE watches ADD COLUMN resolution_mode TEXT NOT NULL DEFAULT 'inherit'")
+            if "completed_success_at" not in watch_columns:
+                db.execute("ALTER TABLE watches ADD COLUMN completed_success_at TEXT")
             match_columns = {r[1] for r in db.execute("PRAGMA table_info(matches)")}
             if "resolution" not in match_columns:
                 db.execute("ALTER TABLE matches ADD COLUMN resolution TEXT")
@@ -366,7 +387,7 @@ class Store:
             if wid is None:
                 c = db.execute(f"INSERT INTO watches ({','.join(columns)},created_at,updated_at,next_run) VALUES ({','.join(['?']*len(columns))},?,?,?)", (*vals, now(), now(), now()))
                 return c.lastrowid
-            cur = db.execute(f"UPDATE watches SET {','.join(c+'=?' for c in columns)},updated_at=?,next_run=? WHERE id=?", (*vals, now(), now(), wid))
+            cur = db.execute(f"UPDATE watches SET {','.join(c+'=?' for c in columns)},updated_at=?,next_run=?,completed_success_at=NULL WHERE id=?", (*vals, now(), now(), wid))
             if not cur.rowcount:
                 raise KeyError(wid)
             return wid
@@ -379,7 +400,6 @@ class Store:
     def log(self, type_: str, message: str):
         with self.conn() as db:
             db.execute("INSERT INTO events(type,message,created_at) VALUES(?,?,?)", (type_, message[:1200], now()))
-            db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 1000)")
 
     def recent(self):
         with self.conn() as db:
@@ -387,6 +407,60 @@ class Store:
             events = self.rows(db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 80"))
             counts = dict(db.execute("SELECT (SELECT count(*) FROM watches) watches, (SELECT count(*) FROM watches WHERE enabled=1) active, (SELECT count(*) FROM matches WHERE status='found') found, (SELECT count(*) FROM matches WHERE status='queued') queued, (SELECT count(*) FROM matches WHERE status IN ('completed','assumed_completed')) completed").fetchone())
         return {"matches": matches, "events": events, "counts": counts}
+
+    def paged_events(self, page: int = 1, page_size: int = 30):
+        """Server-side pagination for events; historical entries aren't capped at 80."""
+        with self.conn() as db:
+            total = db.execute("SELECT count(*) FROM events").fetchone()[0]
+            rows = self.rows(db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ? OFFSET ?", (page_size, (page-1)*page_size)))
+        return {"items": rows, "page": page, "page_size": page_size,
+                "total": total, "pages": max(1, (total + page_size - 1)//page_size)}
+
+    def prune_history(self, history_days: int, completed_days: int) -> dict:
+        """Delete aged *terminal* results and events; never delete active queue or pending finds.
+
+        Grab ledger is retained by design so that cleanup cannot trigger re-downloads.
+        Completed watch removal requires every queued grab to have finished.
+        """
+        deleted = {"events": 0, "matches": 0, "watches": 0}
+        with self.conn() as db:
+            # Persist success time before history ages out; future retention
+            # changes will still work after terminal match rows were removed.
+            db.execute("""
+                UPDATE watches SET completed_success_at=(
+                    SELECT MAX(m.finished_at) FROM matches m
+                    WHERE m.watch_id=watches.id AND m.status IN ('completed','assumed_completed')
+                )
+                WHERE completed_success_at IS NULL AND enabled=0 AND max_grabs>0
+                  AND grab_count>=max_grabs
+                  AND (SELECT COUNT(*) FROM matches m WHERE m.watch_id=watches.id
+                       AND m.status IN ('completed','assumed_completed')) >= grab_count
+                  AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.watch_id=watches.id
+                       AND m.status IN ('queued','found','failed','failed_download'))
+            """)
+            if completed_days:
+                watch_cutoff = (datetime.now(UTC) - timedelta(days=completed_days)).isoformat(timespec="seconds")
+                # A finished quota is not enough: all queued downloads must have
+                # reached confirmed or assumed success before removing the watch.
+                candidates = db.execute("""
+                    SELECT w.id FROM watches w
+                    WHERE w.enabled=0 AND w.max_grabs>0 AND w.grab_count>=w.max_grabs
+                      AND w.completed_success_at IS NOT NULL AND w.completed_success_at < ?
+                      AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.watch_id=w.id
+                           AND m.status IN ('queued','found','failed','failed_download'))
+                """, (watch_cutoff,)).fetchall()
+                ids=[r[0] for r in candidates]
+                for wid in ids:
+                    deleted["watches"] += db.execute("DELETE FROM watches WHERE id=?", (wid,)).rowcount
+            if history_days:
+                cutoff = (datetime.now(UTC) - timedelta(days=history_days)).isoformat(timespec="seconds")
+                deleted["matches"] += db.execute("""
+                    DELETE FROM matches WHERE status IN ('completed','assumed_completed',
+                         'failed','failed_download','skipped','dismissed')
+                    AND COALESCE(finished_at,queued_at,found_at) < ?
+                """, (cutoff,)).rowcount
+                deleted["events"] += db.execute("DELETE FROM events WHERE created_at < ?", (cutoff,)).rowcount
+        return deleted
 
     def match(self, mid: int):
         with self.conn() as db:
@@ -429,7 +503,6 @@ class Store:
                 "INSERT INTO events(type,message,created_at) VALUES(?,?,?)",
                 ("dismissed", f"Dismissed orphaned download: {row['title']}"[:1200], now()),
             )
-            db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 1000)")
             return {"id": mid, "dismissed": True}
 
 
@@ -440,6 +513,7 @@ class Engine:
         self.poll_task = None
         self.stop = asyncio.Event()
         self.client = None
+        self._next_prune = 0.0
 
     async def startup(self):
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=8.0), follow_redirects=False)
@@ -457,6 +531,13 @@ class Engine:
             try:
                 await self.check_due()
                 await self.refresh_downloads()
+                if asyncio.get_running_loop().time() >= self._next_prune:
+                    result = await asyncio.to_thread(self.store.prune_history,
+                        self.config.get("history_retention_days", 14),
+                        self.config.get("completed_watch_retention_days", 7))
+                    self._next_prune = asyncio.get_running_loop().time() + 3600
+                    if any(result.values()):
+                        log.info("Retention cleanup: %s", result)
             except Exception as ex:
                 log.error("Scheduler failure: %s", safe_error(ex))
                 self.store.log("error", f"Scheduler: {safe_error(ex)}")
@@ -473,7 +554,9 @@ class Engine:
         r.raise_for_status()
         return parse_rss(r.content)
 
-    async def push(self, title: str, message: str, kind: str):
+    async def push(self, title: str, message: str, kind: str, watch_name: str = ""):
+        title, message = notification_content(title, message, kind, watch_name,
+                                              self.config.get("pushover_privacy", "full"))
         if not self.config["pushover_key"] or not self.config["pushover_user"]:
             return
         if kind not in self.config["notification_types"]:
@@ -553,7 +636,7 @@ class Engine:
                 self.store.log("found", f"{watch['name']}: {r['title']}")
                 # Avoid sending dozens of pushes when an existing broad search is added.
                 if pushed < 5:
-                    await self.push("NZB found", f"{watch['name']}: {r['title']}", "found")
+                    await self.push("NZB found", f"{watch['name']}: {r['title']}", "found", watch["name"])
                     pushed += 1
             if watch["mode"] == "auto" and queued_this_scan < self.config.get("max_queues_per_scan", 3):
                 outcome = await self.queue_match(mid)
@@ -562,7 +645,7 @@ class Engine:
                     if watch["max_grabs"] and not self.store.watch(watch["id"])["enabled"]:
                         break  # One-off watches automatically stop once their quota is reached.
         if new_count > pushed and self.config["pushover_key"]:
-            await self.push("NZBWatch search summary", f"{watch['name']}: {new_count} new matches found. Showing first {pushed} individually.", "found")
+            await self.push("NZBWatch search summary", f"{watch['name']}: {new_count} new matches found. Showing first {pushed} individually.", "found", watch["name"])
         return {"searched": len(results), "matched": len(eligible), "new": new_count}
 
     async def queue_match(self, mid: int):
@@ -631,9 +714,9 @@ class Engine:
                 # Keep a global unique title fingerprint across watch rules.
                 db.execute("INSERT INTO grabs(fingerprint,match_id,nzo_id,queued_at,content_key) VALUES(?,?,?,?,?)", (m["fingerprint"], mid, nzo_id, now(), key))
                 db.execute("UPDATE matches SET status='queued',nzo_id=?,queued_at=?,note=NULL WHERE id=?", (nzo_id, now(), mid))
-                db.execute("UPDATE watches SET grab_count=grab_count+1, enabled=CASE WHEN max_grabs > 0 AND grab_count+1 >= max_grabs THEN 0 ELSE enabled END WHERE id=?", (w["id"],))
+                db.execute("UPDATE watches SET grab_count=grab_count+1, completed_success_at=NULL, enabled=CASE WHEN max_grabs > 0 AND grab_count+1 >= max_grabs THEN 0 ELSE enabled END WHERE id=?", (w["id"],))
             self.store.log("queued", f"{w['name']}: {m['title']}")
-            await self.push("NZB queued", f"{m['title']} queued in SABnzbd", "queued")
+            await self.push("NZB queued", f"{m['title']} queued in SABnzbd", "queued", w["name"])
             return "queued"
         except Exception as ex:
             with self.store.conn() as db:
@@ -652,9 +735,9 @@ class Engine:
             return
         with self.store.conn() as db:
             rows = self.store.rows(db.execute(
-                "SELECT id,nzo_id,title,note,sab_missing_since FROM matches "
-                "WHERE status='queued' AND nzo_id IS NOT NULL "
-                "ORDER BY id DESC LIMIT 1000"
+                "SELECT m.id,m.nzo_id,m.title,m.note,m.sab_missing_since,w.name AS watch_name FROM matches m JOIN watches w ON w.id=m.watch_id "
+                "WHERE m.status='queued' AND m.nzo_id IS NOT NULL "
+                "ORDER BY m.id DESC LIMIT 1000"
             ))
         if not rows:
             return
@@ -737,7 +820,7 @@ class Engine:
                             self.store.log(status, f"{row['title']}: {'Completed' if status == 'completed' else 'Failed'}")
                             await self.push(
                                 "NZB download completed" if status == "completed" else "NZB download failed",
-                                row["title"], "completed" if status == "completed" else "failed"
+                                row["title"], "completed" if status == "completed" else "failed", row["watch_name"]
                             )
                         continue
 

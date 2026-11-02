@@ -40,11 +40,27 @@
           <div id="completed-watchlist" class="watch-grid"></div>
         </section>
       </section>
-      <section id="view-activity" class="view hidden"><div class="section-head page-section"><div><h2>Results & downloads</h2><p>History is retained across restarts. Each matched title is tracked once per watch.</p></div><select id="status-filter" class="compact-select" aria-label="Filter by status"><option value="">All statuses</option><option value="found">Found</option><option value="queued">Queued</option><option value="completed">Completed</option><option value="assumed_completed">Assumed complete</option><option value="failed">Queue failed</option><option value="failed_download">Download failed</option><option value="skipped">Duplicate</option></select></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="results-body"></tbody></table></div></div><div class="panel activity-log"><div class="section-head"><div><h3>Event log</h3><p>Last 80 system events</p></div></div><div id="event-log"></div></div></section>
+      <section id="view-activity" class="view hidden">
+        <div class="section-head page-section"><div><h2>Results & downloads</h2><p>Active, failed and completed downloads are tracked separately. Finished history is cleaned up according to Retention settings.</p></div></div>
+        <section class="activity-section"><div class="section-head"><div><h3>Active <span class="watch-section-count" id="activity-active-count">0</span></h3><p>Found matches and downloads in progress</p></div></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="activity-active-body"></tbody></table></div></div></section>
+        <section class="activity-section"><div class="section-head"><div><h3>Errors <span class="watch-section-count" id="activity-error-count">0</span></h3><p>Queue submission failures and SABnzbd download errors</p></div></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="activity-error-body"></tbody></table></div></div></section>
+        <section class="activity-section"><div class="section-head"><div><h3>Completed <span class="watch-section-count" id="activity-completed-count">0</span></h3><p>Verified and assumed completions (shown distinctly)</p></div></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="activity-completed-body"></tbody></table></div></div></section>
+        <section class="activity-section" id="activity-skipped-section"><div class="section-head"><div><h3>Skipped duplicates <span class="watch-section-count" id="activity-skipped-count">0</span></h3><p>Already queued by another watch</p></div></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="activity-skipped-body"></tbody></table></div></div></section>
+        <div class="panel activity-log"><div class="section-head"><div><h3>Event log</h3><p id="events-summary">Events are paginated, 30 per page</p></div><div class="pager"><button class="btn secondary tiny" id="events-prev" type="button">← Previous</button><span id="events-page">Page 1</span><button class="btn secondary tiny" id="events-next" type="button">Next →</button></div></div><div id="event-log"></div></div>
+      </section>
       <section id="view-settings" class="view hidden">
         <div class="section-head page-section"><div><h2>Settings</h2><p>Changes save to <code>/data/config.json</code> and take effect without restarting NZBWatch.</p></div><span class="pill">LIVE CONFIGURATION</span></div>
+        <nav class="settings-tabs" role="tablist" aria-label="Settings categories">
+          <button type="button" data-settings-tab="appearance" class="settings-tab active" role="tab" aria-selected="true">Appearance</button>
+          <button type="button" data-settings-tab="integrations" class="settings-tab" role="tab" aria-selected="false">Integrations</button>
+          <button type="button" data-settings-tab="search" class="settings-tab" role="tab" aria-selected="false">Search &amp; scheduling</button>
+          <button type="button" data-settings-tab="resolution" class="settings-tab" role="tab" aria-selected="false">Resolution</button>
+          <button type="button" data-settings-tab="sab" class="settings-tab" role="tab" aria-selected="false">SABnzbd</button>
+          <button type="button" data-settings-tab="notifications" class="settings-tab" role="tab" aria-selected="false">Notifications</button>
+          <button type="button" data-settings-tab="retention" class="settings-tab" role="tab" aria-selected="false">Retention</button>
+        </nav>
         <form id="settings-form">
-          <div class="panel settings-panel">
+          <div class="panel settings-panel" data-settings-panel="appearance" role="tabpanel">
             <div class="section-head"><div><h3>Appearance</h3><p>Choose how watches are arranged in the Watchlist. This preference is shared across devices and saved in /data/config.json.</p></div></div>
             <div class="form-grid settings-grid">
               <div class="field"><label for="settings-watchlist-columns">Watchlist columns</label>
@@ -54,9 +70,11 @@
                 </select>
                 <small>Smaller screens automatically use a single column.</small>
               </div>
+              <div class="field"><label for="theme-mode">Theme</label><select id="theme-mode" name="theme_mode"><option value="dark">Dark</option><option value="light">Light</option></select><small>Applied across the dashboard immediately after saving.</small></div>
+              <div class="field"><label for="theme-color">Accent color</label><input id="theme-color" name="theme_color" type="color" value="#56d7ba"><small>Choose any accent color; stored in /data/config.json.</small></div>
             </div>
           </div>
-          <div class="panel settings-panel">
+          <div class="panel settings-panel" data-settings-panel="integrations" role="tabpanel">
             <div class="section-head"><div><h3>Integrations</h3><p>Leave an API key blank to retain the saved value; use Clear to remove it.</p></div></div>
             <div class="form-grid settings-grid">
               <div class="field full"><label for="settings-hydra-url">NZBHydra2 URL</label><input id="settings-hydra-url" name="hydra_url" placeholder="http://192.168.1.40:5076/nzbhydra2" maxlength="500"><small>Base URL, not /api</small></div>
@@ -68,7 +86,7 @@
             </div>
             <div class="integration-grid compact-services"><div class="service panel" id="service-hydra"><h3>NZBHydra2</h3><div class="service-status"></div><button type="button" class="btn secondary" data-test="hydra">Test connection</button></div><div class="service panel" id="service-sab"><h3>SABnzbd</h3><div class="service-status"></div><button type="button" class="btn secondary" data-test="sab">Test connection</button></div><div class="service panel" id="service-pushover"><h3>Pushover</h3><div class="service-status"></div><button type="button" class="btn secondary" data-test="pushover">Send test</button></div></div>
           </div>
-          <div class="panel settings-panel">
+          <div class="panel settings-panel" data-settings-panel="search" role="tabpanel">
             <div class="section-head"><div><h3>Search & scheduling</h3><p>Global defaults apply to all watches set to inherit them.</p></div></div>
             <div class="form-grid settings-grid">
               <div class="field"><label for="settings-scan">Global scan interval (minutes)</label><input type="number" name="scan_interval_minutes" id="settings-scan" min="5" max="10080" required><small>Per-watch interval of 0 uses this value.</small></div>
@@ -77,7 +95,7 @@
               <div class="field full check-field"><label class="settings-toggle"><input type="checkbox" name="strip_release_groups"> Strip trailing release-group tags when cleaning queries</label></div>
             </div>
           </div>
-          <div class="panel settings-panel">
+          <div class="panel settings-panel" data-settings-panel="resolution" role="tabpanel">
             <div class="section-head"><div><h3>Resolution preferences</h3><p>Rank releases by resolution before choosing which result to queue. Global quality filtering is opt-in.</p></div></div>
             <div class="form-grid settings-grid">
               <div class="field full check-field"><label class="settings-toggle"><input type="checkbox" name="resolution_enabled"> Enable resolution-based selection for watches inheriting global settings</label></div>
@@ -88,7 +106,7 @@
             </div>
             <div class="note">Automatic watches queue the best available accepted result immediately. They do not wait for a preferred resolution to appear in a later scan. A one-off watch stops after a successful queue.</div>
           </div>
-          <div class="panel settings-panel">
+          <div class="panel settings-panel" data-settings-panel="sab" role="tabpanel">
             <h3>SABnzbd status reconciliation</h3>
             <p>When SABnzbd automatically clears completed downloads and history, NZBWatch may be unable to verify the final outcome.</p>
             <div class="form-grid settings-grid">
@@ -105,10 +123,23 @@
             </div>
             <div class="note">Assumed complete is not verified success. Deleted, failed or manually removed jobs could also disappear. No confirmed-completion Pushover notification is sent for assumptions.</div>
           </div>
-          <div class="panel settings-panel">
+          <div class="panel settings-panel" data-settings-panel="notifications" role="tabpanel">
             <h3>Notifications</h3>
             <div class="checkbox-row" id="notify-checkboxes"><label><input type="checkbox" value="found"> Found</label><label><input type="checkbox" value="queued"> Queued</label><label><input type="checkbox" value="completed"> Completed</label><label><input type="checkbox" value="failed"> Failed</label></div>
+            <div class="field" style="max-width:530px"><label for="pushover-privacy">Notification privacy</label><select id="pushover-privacy" name="pushover_privacy">
+              <option value="full">1 — Original details (watch + release filename)</option>
+              <option value="watch_only">2 — Watch name only (hide search terms and release filename)</option>
+              <option value="generic">3 — Generic notification only (no identifying names)</option>
+            </select><small>Applies to future Pushover notifications, including found, queued, completed and failed.</small></div>
             <p id="notification-types" class="muted-sub"></p>
+          </div>
+          <div class="panel settings-panel" data-settings-panel="retention" role="tabpanel">
+            <div class="section-head"><div><h3>Automatic retention</h3><p>NZBWatch prunes aged records automatically, usually within an hour. Zero disables a cleanup rule.</p></div></div>
+            <div class="form-grid settings-grid">
+              <div class="field"><label for="history-retention">History retention (days)</label><input id="history-retention" name="history_retention_days" type="number" min="0" max="3650" value="14" required><small>Default 14. Deletes old completed/error/skipped/dismissed results and event log entries. Active queued and unreviewed found matches are protected.</small></div>
+              <div class="field"><label for="completed-watch-retention">Successful completed watches (days)</label><input id="completed-watch-retention" name="completed_watch_retention_days" type="number" min="0" max="3650" value="7" required><small>Default 7. Starts from the last successful or assumed-complete download, after all downloads are finished. Failed/incomplete watches stay.</small></div>
+            </div>
+            <div class="note">Cleanup deletes local NZBWatch records, not SABnzbd downloads. NZBWatch retains its grab fingerprint ledger to prevent duplicate auto-downloads even after cleanup. Back up /data before changing retention.</div>
           </div>
           <div class="settings-save"><span>Secrets are stored in /data/config.json (mode 0600). Keep backups private.</span><button class="btn primary" type="submit" id="save-settings">Save settings — apply now</button></div>
         </form>

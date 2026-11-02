@@ -1,5 +1,5 @@
 'use strict';
-let csrf = '', currentView = 'overview', state = null, refreshPending = false, toastTimer = null, settingsData = null, previewRequest = 0;
+let csrf = '', currentView = 'overview', state = null, refreshPending = false, toastTimer = null, settingsData = null, previewRequest = 0, settingsTab = 'appearance', eventPage = 1, eventPages = 1, eventRequest = 0;
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtTime = s => { if (!s) return 'Never'; const d = new Date(s); return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); };
@@ -22,14 +22,42 @@ async function api(path, opts={}) {
   return data;
 }
 function showLogin(){ $('login').classList.remove('hidden'); $('application').classList.add('hidden'); $('password').value=''; }
+function applyTheme(prefs={}) {
+  const root=document.documentElement;
+  root.dataset.theme=prefs.theme_mode==='light'?'light':'dark';
+  const color=/^#[0-9a-f]{6}$/i.test(prefs.theme_color||'')?prefs.theme_color:'#56d7ba';
+  root.style.setProperty('--accent',color);
+  const rgb=[1,3,5].map(i=>parseInt(color.slice(i,i+2),16)/255);
+  const lin=rgb.map(v=>v<=.04045?v/12.92:Math.pow((v+.055)/1.055,2.4));
+  const lum=.2126*lin[0]+.7152*lin[1]+.0722*lin[2];
+  root.style.setProperty('--accent-ink',lum>.28?'#092621':'#ffffff');
+  const meta=document.querySelector('meta[name="color-scheme"]');
+  if(meta)meta.content=root.dataset.theme;
+}
+function showSettingsTab(tab) {
+  settingsTab=tab;
+  document.querySelectorAll('[data-settings-tab]').forEach(btn=>{const on=btn.dataset.settingsTab===tab;btn.classList.toggle('active',on);btn.setAttribute('aria-selected',on?'true':'false');});
+  document.querySelectorAll('[data-settings-panel]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.settingsPanel!==tab));
+}
+async function loadEvents(page=eventPage){
+  const serial=++eventRequest;
+  const result=await api('/api/events?page='+encodeURIComponent(page)+'&page_size=30');
+  if(serial!==eventRequest)return;
+  eventPages=result.pages;eventPage=Math.min(page,result.pages);
+  $('event-log').innerHTML=result.items.length?result.items.map(eventHtml).join(''):empty('No events yet.');
+  $('events-summary').textContent=`${result.total} events · 30 per page`;
+  $('events-page').textContent=`Page ${eventPage} of ${eventPages}`;
+  $('events-prev').disabled=eventPage<=1;
+  $('events-next').disabled=eventPage>=eventPages;
+}
 function showApp(){ $('login').classList.add('hidden'); $('application').classList.remove('hidden'); }
 async function initialize(){
   try{const s=await api('/api/session');if(s.authenticated){csrf=s.csrf;showApp();await refresh();}else{showLogin();}}catch{showLogin();}
   setInterval(()=>{if(!$('application').classList.contains('hidden')) refresh().catch(()=>{});},15000);
 }
 async function refresh(){if(refreshPending)return;refreshPending=true;try{state=await api('/api/state');render();$('side-update').textContent=`Updated ${fmtTime(state.time)}`;}catch(e){if(e.message!=='Login required')toast('Refresh failed: '+e.message,true);}finally{refreshPending=false;}}
-function go(view){currentView=view;for(const v of ['overview','watches','activity','settings'])$('view-'+v).classList.toggle('hidden',v!==view);document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('page-title').textContent=({overview:'Overview',watches:'Watchlist',activity:'Activity',settings:'Settings'})[view];render();if(view==='settings')loadSettings().catch(handleError);}
-function render(){if(!state)return;const c=state.counts;$('stat-active').textContent=c.active;$('stat-found').textContent=c.found;$('stat-queued').textContent=c.queued;$('stat-completed').textContent=c.completed;$('nav-count').textContent=state.watches.filter(w=>!isCompletedWatch(w)).length;renderOverview();renderWatches();renderActivity();renderSettings();}
+function go(view){currentView=view;for(const v of ['overview','watches','activity','settings'])$('view-'+v).classList.toggle('hidden',v!==view);document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('page-title').textContent=({overview:'Overview',watches:'Watchlist',activity:'Activity',settings:'Settings'})[view];render();if(view==='settings'){showSettingsTab(settingsTab);loadSettings().catch(handleError);}if(view==='activity')loadEvents().catch(handleError);}
+function render(){if(!state)return;applyTheme(state.preferences);const c=state.counts;$('stat-active').textContent=c.active;$('stat-found').textContent=c.found;$('stat-queued').textContent=c.queued;$('stat-completed').textContent=c.completed;$('nav-count').textContent=state.watches.filter(w=>!isCompletedWatch(w)).length;renderOverview();renderWatches();renderActivity();renderSettings();}
 function empty(text){return `<div class="empty"><div class="empty-symbol">◇</div>${esc(text)}</div>`;}
 function renderOverview(){
   const ongoing=state.watches.filter(w=>!isCompletedWatch(w));
@@ -60,7 +88,21 @@ function renderWatches(){
   $('completed-watchlist').innerHTML=completed.length?completed.map(watchCard).join(''):empty(filter?'No completed watches match this filter.':'No completed watches yet.');
 }
 function canDismissOrphan(m){return (m.status==='queued' && !!m.nzo_id && !!m.sab_missing_since && (m.note||'').startsWith('SAB status unverified:')) || (m.status==='assumed_completed' && (m.note||'').startsWith('Completion assumed:'));}
-function renderActivity(){const status=$('status-filter').value;const matches=state.matches.filter(m=>!status||m.status===status);$('results-body').innerHTML=matches.length?matches.map(m=>`<tr><td>${esc(m.title)}${m.note?'<div class="muted-sub">'+esc(m.note)+'</div>':''}${m.nzo_id?'<div class="muted-sub">'+esc(m.nzo_id)+'</div>':''}</td><td>${esc(m.watch_name)}</td><td>${fmtSize(m.size_bytes)}${m.resolution?'<div class="muted-sub">'+esc(m.resolution)+'</div>':''}</td><td><span class="pill ${esc(m.status)}">${esc(formatStatus(m.status))}</span></td><td>${fmtTime(m.found_at)}</td><td>${m.status==='found'||m.status==='failed'?`<button class="btn secondary tiny" data-queue="${m.id}">Queue</button>`:canDismissOrphan(m)?`<button type="button" class="btn danger tiny orphan-dismiss" data-dismiss-match="${m.id}" aria-label="Dismiss orphaned download ${esc(m.title)}" title="Remove from NZBWatch Activity (does not delete from SABnzbd)">×</button>`:''}</td></tr>`).join(''):`<tr><td colspan="6">${empty('No matching results yet.')}</td></tr>`;$('event-log').innerHTML=state.events.length?state.events.map(eventHtml).join(''):empty('No events yet.');}
+function activityRow(m){
+  return `<tr><td>${esc(m.title)}${m.note?'<div class="muted-sub">'+esc(m.note)+'</div>':''}${m.nzo_id?'<div class="muted-sub">'+esc(m.nzo_id)+'</div>':''}</td><td>${esc(m.watch_name)}</td><td>${fmtSize(m.size_bytes)}${m.resolution?'<div class="muted-sub">'+esc(m.resolution)+'</div>':''}</td><td><span class="pill ${esc(m.status)}">${esc(formatStatus(m.status))}</span></td><td>${fmtTime(m.found_at)}</td><td>${m.status==='found'||m.status==='failed'?`<button class="btn secondary tiny" data-queue="${m.id}">Queue</button>`:canDismissOrphan(m)?`<button type="button" class="btn danger tiny orphan-dismiss" data-dismiss-match="${m.id}" aria-label="Dismiss orphaned download ${esc(m.title)}" title="Remove from NZBWatch Activity (does not delete from SABnzbd)">×</button>`:''}</td></tr>`;
+}
+function renderActivity(){
+  const groups={active:[],error:[],completed:[],skipped:[]};
+  for(const m of state.matches){
+    const group=({found:'active',queued:'active',failed:'error',failed_download:'error',completed:'completed',assumed_completed:'completed',skipped:'skipped'})[m.status];
+    if(group)groups[group].push(m);
+  }
+  for(const [key,list] of Object.entries(groups)){
+    $('activity-'+key+'-count').textContent=list.length;
+    $('activity-'+key+'-body').innerHTML=list.length?list.map(activityRow).join(''):`<tr><td colspan="6">${empty('No '+key+' results.')}</td></tr>`;
+  }
+  $('activity-skipped-section').classList.toggle('hidden',!groups.skipped.length);
+}
 function renderSettings(){for(const provider of ['hydra','sab','pushover']){const status=$('service-'+provider).querySelector('.service-status');status.innerHTML=state.integrations[provider]?'<span class="live-dot"></span> Credentials configured':'<span style="color:#ffabac">●</span> Not configured';}$('notification-types').textContent='Active notifications: '+(state.integrations.notify_events.join(', ')||'none');}
 function openWatch(w=null){$('watch-form').reset();$('watch-id').value=w?.id||'';$('modal-title').textContent=w?'Edit watch':'New watch';const defaults={name:'',query:'',enabled:1,mode:'auto',match_mode:'all',required_words:'',excluded_words:'',categories:'',sab_category:'',min_mb:'',max_mb:'',max_age_days:'',max_grabs:1,poll_minutes:0,broad_search:true,resolution_mode:'inherit'};const data={...defaults,...(w||{})};for(const [key,val] of Object.entries(data)){const field=$('watch-form').elements.namedItem(key);if(!field)continue;if(field.type==='checkbox')field.checked=Boolean(val);else field.value=val===null?'':val;}$('watch-modal').classList.remove('hidden');document.body.style.overflow='hidden';$('watch-name').focus();updatePreview();}
 function closeWatch(){$('watch-modal').classList.add('hidden');document.body.style.overflow='';}
@@ -85,9 +127,9 @@ async function loadSettings(){
 function settingsPayload(){
   const f=$('settings-form');
   const o={};
-  for(const k of ['hydra_url','sab_url','fallback_min_resolution','sab_missing_policy'])o[k]=f.elements.namedItem(k).value.trim();
+  for(const k of ['hydra_url','sab_url','fallback_min_resolution','sab_missing_policy','pushover_privacy','theme_mode','theme_color'])o[k]=f.elements.namedItem(k).value.trim();
   o.watchlist_columns=Number(f.elements.namedItem('watchlist_columns').value);
-  for(const k of ['scan_interval_minutes','max_queues_per_scan','sab_missing_grace_minutes'])o[k]=Number(f.elements.namedItem(k).value);
+  for(const k of ['scan_interval_minutes','max_queues_per_scan','sab_missing_grace_minutes','history_retention_days','completed_watch_retention_days'])o[k]=Number(f.elements.namedItem(k).value);
   for(const k of ['clean_search_terms','strip_release_groups','resolution_enabled','allow_unknown_resolution','dedupe_across_resolutions'])o[k]=f.elements.namedItem(k).checked;
   o.resolution_order=f.elements.namedItem('resolution_order').value.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
   o.notification_types=[...document.querySelectorAll('#notify-checkboxes input:checked')].map(x=>x.value);
@@ -117,9 +159,9 @@ window.addEventListener('DOMContentLoaded',()=>{
   $('add-watch').addEventListener('click',()=>openWatch());$('close-modal').addEventListener('click',closeWatch);$('cancel-modal').addEventListener('click',closeWatch);
   $('watch-modal').addEventListener('click',e=>{if(e.target===$('watch-modal'))closeWatch();});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('watch-modal').classList.contains('hidden'))closeWatch();});
   $('watch-form').addEventListener('submit',async e=>{e.preventDefault();const id=$('watch-id').value;const btn=$('save-watch');btn.disabled=true;try{await api(id?`/api/watches/${id}`:'/api/watches',{method:id?'PUT':'POST',body:watchPayload()});closeWatch();toast(id?'Watch updated':'Watch created');await refresh();}catch(ex){handleError(ex)}finally{btn.disabled=false;}});
-  $('watch-query').addEventListener('input',updatePreview);$('filter-watches').addEventListener('input',renderWatches);$('status-filter').addEventListener('change',renderActivity);
+  $('watch-query').addEventListener('input',updatePreview);$('filter-watches').addEventListener('input',renderWatches);document.querySelectorAll('[data-settings-tab]').forEach(b=>b.addEventListener('click',()=>showSettingsTab(b.dataset.settingsTab)));$('events-prev').addEventListener('click',()=>{if(eventPage>1)loadEvents(eventPage-1).catch(handleError);});$('events-next').addEventListener('click',()=>{if(eventPage<eventPages)loadEvents(eventPage+1).catch(handleError);});
   $('view-watches').addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;const id=Number(b.dataset.edit||b.dataset.delete||b.dataset.check);if(b.dataset.edit){const w=state.watches.find(x=>x.id===id);if(w)openWatch(w);}else if(b.dataset.delete){const w=state.watches.find(x=>x.id===id);if(!confirm(`Delete “${w?.name||id}” and its saved matches? This cannot be undone.`))return;try{await api(`/api/watches/${id}`,{method:'DELETE'});toast('Watch deleted');await refresh();}catch(ex){handleError(ex);}}else if(b.dataset.check){try{await api(`/api/watches/${id}/check`,{method:'POST'});toast('Scan started. Results will appear in Activity.');}catch(ex){handleError(ex);}}});
-  $('results-body').addEventListener('click',async e=>{
+  $('view-activity').addEventListener('click',async e=>{
     const dismissButton=e.target.closest('[data-dismiss-match]');
     if(dismissButton){
       const id=Number(dismissButton.dataset.dismissMatch);

@@ -1,9 +1,22 @@
-# NZBWatch v0.2.8
+# NZBWatch v0.2.9
 
 **Updated 2 November 2026.** Full application with Watchlist layouts, live settings, Hydra download fixes and optional handling for SABnzbd jobs automatically removed from queue/history.
 
 
 A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation dashboard. Includes Pushover notifications. Designed for a **single Docker container and a persistent Docker volume**; no Node, Redis, or external database is needed.
+
+## v0.2.9: retention, notification privacy, activity layout and themes
+
+- **Retention:** In Settings → Retention, choose how many days to keep event logs and terminal match records (**14 days by default**) and successful completed watches (**7 days**). Set either to **0** to disable that cleanup. The scheduler prunes approximately hourly, including shortly after startup. Local deletion cannot be undone without an appdata backup.
+- **Active records stay:** Pending `found` matches and queued downloads are not auto-deleted, including SAB jobs awaiting status reconciliation. Terminal matches (completed, assumed complete, queue/download errors, skipped or dismissed) and event logs are eligible after the configured retention period.
+- **Completed watch retention:** One-off / limited watches are eligible for deletion only when their download quota was met *and* the submitted downloads are all confirmed **Completed** or labelled **Assumed complete**. The age starts at the last terminal-success time, not when the watch was queued. Assumed complete remains **unverified**. Unfinished and failed downloads protect watches from removal.
+- **Duplicate protection:** A separate internal fingerprint ledger is retained when historical Activity rows or completed watches are deleted. That prevents cleanup from causing repeat automatic downloads.
+- **Pushover privacy levels:** 1) Original details, 2) Show the watch display name but not raw search terms or release filenames, 3) Generic messages with no identifying names. Privacy applies to all alert types and search summaries; the app's local Activity/event history remains detailed. A watch name that happens to contain sensitive details is still visible in level 2; use level 3 to hide it.
+- **Activity:** Separate **Active**, **Errors**, **Completed** sections, with skipped duplicates distinct. Event log is fetched from a new authenticated `GET /api/events?page=...&page_size=30` endpoint; 30 events per page.
+- **Tabbed Settings:** Appearance, Integrations, Search & scheduling, Resolution, SABnzbd, Notifications, Retention. There is one Save button; tabs don't discard unsaved changes.
+- **Appearance:** Dark/light theme and custom accent color, saved globally in `/data/config.json` and applied without restarting.
+
+**Upgrade:** Back up Unraid appdata before releasing `v0.2.9`. Existing watches and settings are migrated in place. Newly configured retention defaults can delete already-old terminal records on the first scheduler cycle; consider setting them to `0` before upgrading if you need to preserve all old history. See [UPGRADE_UNRAID.md](UPGRADE_UNRAID.md).
 
 ## v0.2.8: Dismiss orphaned SAB downloads from Activity
 
@@ -58,7 +71,7 @@ A confirmed SAB history `Completed` or `Failed` takes priority, and network/API 
 
 ## Upgrading an existing Unraid container
 
-See **[UPGRADE_UNRAID.md](UPGRADE_UNRAID.md)**. You must retain the existing `/data` mapping, and update the container image to `virtike/nzbwatch:0.2.7` after publishing the `v0.2.7` Git tag. Take an appdata backup before upgrading. The SQLite database is migrated in place and secrets are imported from existing env vars on first startup.
+See **[UPGRADE_UNRAID.md](UPGRADE_UNRAID.md)**. You must retain the existing `/data` mapping, and update the container image to `virtike/nzbwatch:0.2.9` after publishing the `v0.2.9` Git tag. Take an appdata backup before upgrading. The SQLite database is migrated in place and secrets are imported from existing env vars on first startup.
 
 ## Quick start (Docker Compose)
 

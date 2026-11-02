@@ -189,7 +189,7 @@ async def logout(request: Request):
 async def state(request: Request):
     require(request)
     return {"watches": store.watches(), **store.recent(),
-            "preferences": {"watchlist_columns": CONFIG["watchlist_columns"]}, "integrations": {
+            "preferences": {"watchlist_columns": CONFIG["watchlist_columns"], "theme_mode": CONFIG["theme_mode"], "theme_color": CONFIG["theme_color"]}, "integrations": {
         "hydra": bool(CONFIG["hydra_url"] and CONFIG["hydra_key"]),
         "sab": bool(CONFIG["sab_url"] and CONFIG["sab_key"]),
         "pushover": bool(CONFIG["pushover_user"] and CONFIG["pushover_key"]),
@@ -218,6 +218,11 @@ class SettingsIn(BaseModel):
     watchlist_columns: int = Field(default=2, ge=1, le=2)
     sab_missing_policy: str = Field(default="keep_queued", pattern="^(keep_queued|assume_completed)$")
     sab_missing_grace_minutes: int = Field(default=60, ge=5, le=10080)
+    history_retention_days: int = Field(default=14, ge=0, le=3650)
+    completed_watch_retention_days: int = Field(default=7, ge=0, le=3650)
+    pushover_privacy: str = Field(default="full", pattern="^(full|watch_only|generic)$")
+    theme_mode: str = Field(default="dark", pattern="^(dark|light)$")
+    theme_color: str = Field(default="#56d7ba", pattern=r"^#[a-fA-F0-9]{6}$")
 
     @field_validator("notification_types")
     @classmethod
@@ -248,7 +253,7 @@ async def put_settings(request: Request, data: SettingsIn):
         # Presentation-only changes can safely be saved during a scan.
         active_changes = {key for key, value in submitted.items()
                           if value is not None and value != CONFIG.get(key)}
-        if active_changes - {"watchlist_columns"}:
+        if active_changes - {"watchlist_columns", "theme_mode", "theme_color", "pushover_privacy", "history_retention_days", "completed_watch_retention_days"}:
             raise HTTPException(409, "Scan underway; save settings once the current scan finishes")
     old_interval = CONFIG["scan_interval_minutes"]
     try:
@@ -262,6 +267,14 @@ async def put_settings(request: Request, data: SettingsIn):
             db.execute("UPDATE watches SET next_run=? WHERE enabled=1 AND poll_minutes=0", (iso_after(CONFIG["scan_interval_minutes"]),))
     store.log("config", "Updated application settings")
     return result
+
+
+@app.get("/api/events")
+async def get_events(request: Request, page: int = 1, page_size: int = 30):
+    require(request)
+    if page < 1 or page > 100000 or page_size < 1 or page_size > 100:
+        raise HTTPException(422, "Invalid event pagination")
+    return store.paged_events(page, page_size)
 
 
 @app.get("/api/query-preview")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -27,6 +28,12 @@ DEFAULTS = {
     "watchlist_columns": 2,  # 1 = full-width rows, 2 = two-column cards
     "sab_missing_policy": "keep_queued",  # opt-in: assume_completed
     "sab_missing_grace_minutes": 60,  # first absence must persist this long
+    "history_retention_days": 14,  # terminal match rows and event log; 0 disables
+    "completed_watch_retention_days": 7,  # after confirmed/assumed success; 0 disables
+    "pushover_privacy": "full",  # full, watch_only, generic
+    "theme_mode": "dark",  # dark or light
+    "theme_color": "#56d7ba",  # accent hex color
+
 }
 
 
@@ -69,6 +76,16 @@ def verify(data: dict) -> dict:
         raise ValueError("Invalid missing SAB job policy")
     if type(out["watchlist_columns"]) is not int or out["watchlist_columns"] not in (1, 2):
         raise ValueError("Watchlist columns must be 1 or 2")
+    for key in ("history_retention_days", "completed_watch_retention_days"):
+        if type(out[key]) is not int or not 0 <= out[key] <= 3650:
+            raise ValueError(f"{key} must be between 0 and 3650 days")
+    if out["pushover_privacy"] not in ("full", "watch_only", "generic"):
+        raise ValueError("Invalid Pushover privacy level")
+    if out["theme_mode"] not in ("dark", "light"):
+        raise ValueError("Theme must be dark or light")
+    if not isinstance(out["theme_color"], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", out["theme_color"]):
+        raise ValueError("Theme color must be a six-digit hex color")
+    out["theme_color"] = out["theme_color"].lower()
     for key in ("clean_search_terms", "strip_release_groups", "resolution_enabled", "allow_unknown_resolution", "dedupe_across_resolutions"):
         if type(out[key]) is not bool:
             raise ValueError(f"{key} must be true or false")
