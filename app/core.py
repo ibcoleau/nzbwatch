@@ -339,6 +339,8 @@ class Store:
             match_columns = {r[1] for r in db.execute("PRAGMA table_info(matches)")}
             if "resolution" not in match_columns:
                 db.execute("ALTER TABLE matches ADD COLUMN resolution TEXT")
+            if "sab_missing_since" not in match_columns:
+                db.execute("ALTER TABLE matches ADD COLUMN sab_missing_since TEXT")
             grab_columns = {r[1] for r in db.execute("PRAGMA table_info(grabs)")}
             if "content_key" not in grab_columns:
                 db.execute("ALTER TABLE grabs ADD COLUMN content_key TEXT")
@@ -383,7 +385,7 @@ class Store:
         with self.conn() as db:
             matches = self.rows(db.execute("SELECT m.id,m.watch_id,w.name AS watch_name,m.title,m.size_bytes,m.resolution,m.published,m.status,m.nzo_id,m.note,m.found_at,m.queued_at,m.finished_at FROM matches m JOIN watches w ON w.id=m.watch_id ORDER BY m.id DESC LIMIT 250"))
             events = self.rows(db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 80"))
-            counts = dict(db.execute("SELECT (SELECT count(*) FROM watches) watches, (SELECT count(*) FROM watches WHERE enabled=1) active, (SELECT count(*) FROM matches WHERE status='found') found, (SELECT count(*) FROM matches WHERE status='queued') queued, (SELECT count(*) FROM matches WHERE status='completed') completed").fetchone())
+            counts = dict(db.execute("SELECT (SELECT count(*) FROM watches) watches, (SELECT count(*) FROM watches WHERE enabled=1) active, (SELECT count(*) FROM matches WHERE status='found') found, (SELECT count(*) FROM matches WHERE status='queued') queued, (SELECT count(*) FROM matches WHERE status IN ('completed','assumed_completed')) completed").fetchone())
         return {"matches": matches, "events": events, "counts": counts}
 
     def match(self, mid: int):
@@ -603,16 +605,15 @@ class Engine:
     async def refresh_downloads(self):
         """Reconcile queued NZBWatch jobs against SAB's queue and history.
 
-        SAB may omit matching jobs from a filtered history response (for example,
-        due to history view/limit behaviour). Querying only that response left
-        completed downloads looking permanently queued. Never infer completion
-        from absence: only SAB's explicit Completed / Failed status is terminal.
+        Prefer explicit Completed / Failed history records. Optionally, after
+        successful API checks and a persisted grace period, classify a job missing
+        from both queue and history as *assumed* complete (not verified).
         """
         if not self.config["sab_url"] or not self.config["sab_key"]:
             return
         with self.store.conn() as db:
             rows = self.store.rows(db.execute(
-                "SELECT id,nzo_id,title,note FROM matches "
+                "SELECT id,nzo_id,title,note,sab_missing_since FROM matches "
                 "WHERE status='queued' AND nzo_id IS NOT NULL "
                 "ORDER BY id DESC LIMIT 1000"
             ))
@@ -620,16 +621,17 @@ class Engine:
             return
 
         def get_slots(response: dict, section: str) -> list[dict]:
-            value = response.get(section, {})
-            slots = value.get("slots", []) if isinstance(value, dict) else []
-            return [slot for slot in slots if isinstance(slot, dict)] if isinstance(slots, list) else []
+            # Malformed API responses must NOT be interpreted as an empty queue.
+            value = response.get(section)
+            if not isinstance(value, dict) or not isinstance(value.get("slots"), list):
+                raise ValueError(f"Unexpected SABnzbd {section} response; status not changed")
+            return [slot for slot in value["slots"] if isinstance(slot, dict)]
 
         def index_slots(slots: list[dict]) -> dict[str, dict]:
             return {str(slot["nzo_id"]): slot for slot in slots if slot.get("nzo_id")}
 
-        # Limit pagination in case SAB ignores nzo_ids or history contains very
-        # large numbers of unrelated entries. A missing item remains queued and
-        # is clearly annotated rather than incorrectly marked as completed.
+        # Limit pagination to bound API cost. An absent job is classified only
+        # by the explicit, configurable grace-period policy below.
         async def find_history_pages(target: set[str], *, archive: bool = False) -> dict[str, dict]:
             found = {}
             seen = set()
@@ -687,7 +689,7 @@ class Engine:
                         )) if failure else None
                         with self.store.conn() as db:
                             updated = db.execute(
-                                "UPDATE matches SET status=?,finished_at=?,note=? "
+                                "UPDATE matches SET status=?,finished_at=?,note=?,sab_missing_since=NULL "
                                 "WHERE id=? AND status='queued'",
                                 (status, now(), note, row["id"])
                             ).rowcount
@@ -703,10 +705,42 @@ class Engine:
                     # A job might be downloading, processing, or paused; keep
                     # queued until SAB confirms a terminal status.
                     if job or nzo_id in queue:
-                        if row["note"] and row["note"].startswith("SAB status unverified:"):
+                        # Cancel any absence timer when the job reappears.
+                        if row["sab_missing_since"] or (row["note"] and row["note"].startswith("SAB status unverified:")):
                             with self.store.conn() as db:
-                                db.execute("UPDATE matches SET note=NULL WHERE id=? AND status='queued'", (row["id"],))
+                                db.execute("UPDATE matches SET note=NULL,sab_missing_since=NULL WHERE id=? AND status='queued'", (row["id"],))
                         continue
+
+                    # A successful enqueue is not proof of successful completion.
+                    # Start a *persisted* timer on the first verified absence,
+                    # rather than using queued_at, which might be weeks old.
+                    missing_since = row["sab_missing_since"]
+                    if not missing_since:
+                        missing_since = now()
+                        with self.store.conn() as db:
+                            db.execute("UPDATE matches SET sab_missing_since=? WHERE id=? AND status='queued'", (missing_since, row["id"]))
+
+                    if self.config.get("sab_missing_policy", "keep_queued") == "assume_completed":
+                        try:
+                            absent_for = datetime.now(UTC) - datetime.fromisoformat(missing_since)
+                            grace = timedelta(minutes=self.config.get("sab_missing_grace_minutes", 60))
+                        except (ValueError, TypeError, OverflowError):
+                            absent_for = timedelta(0)
+                            grace = timedelta(minutes=60)
+                        if absent_for >= grace:
+                            note = ("Completion assumed: SABnzbd accepted the job but its ID "
+                                    "is no longer present in queue or available history. "
+                                    "Completion was not verified; job may have been deleted or failed.")
+                            with self.store.conn() as db:
+                                updated = db.execute(
+                                    "UPDATE matches SET status='assumed_completed',finished_at=?,note=? "
+                                    "WHERE id=? AND status='queued'",
+                                    (now(), note, row["id"])
+                                ).rowcount
+                            if updated:
+                                self.store.log("assumed_completed", f"{row['title']}: Assumed complete (not verified by SABnzbd)")
+                                # Do NOT send a confirmed-completion notification.
+                            continue
 
                     message = (
                         "SAB status unverified: job not found in current queue or "

@@ -26,7 +26,7 @@
       <header class="topbar"><div><span class="eyebrow">YOUR AUTOMATION HUB</span><h1 id="page-title">Overview</h1></div><div class="toolbar"><span class="live-label"><span class="live-dot"></span> Monitor online</span><button id="check-all" class="btn secondary">↻ &nbsp; Check all now</button><button id="add-watch" class="btn primary">+ &nbsp; Add watch</button></div></header>
       <section id="view-overview" class="view">
 
-        <div class="stats"><div class="stat"><div class="stat-label">ACTIVE WATCHES <span>◎</span></div><div class="stat-number" id="stat-active">—</div><div class="stat-foot">Monitoring on schedule</div></div><div class="stat"><div class="stat-label">NEW MATCHES <span>✳</span></div><div class="stat-number" id="stat-found">—</div><div class="stat-foot">Ready for review</div></div><div class="stat"><div class="stat-label">IN SAB QUEUE <span>⇣</span></div><div class="stat-number" id="stat-queued">—</div><div class="stat-foot">Queued / in progress</div></div><div class="stat"><div class="stat-label">COMPLETED <span>✓</span></div><div class="stat-number" id="stat-completed">—</div><div class="stat-foot">Finished downloads</div></div></div>
+        <div class="stats"><div class="stat"><div class="stat-label">ACTIVE WATCHES <span>◎</span></div><div class="stat-number" id="stat-active">—</div><div class="stat-foot">Monitoring on schedule</div></div><div class="stat"><div class="stat-label">NEW MATCHES <span>✳</span></div><div class="stat-number" id="stat-found">—</div><div class="stat-foot">Ready for review</div></div><div class="stat"><div class="stat-label">IN SAB QUEUE <span>⇣</span></div><div class="stat-number" id="stat-queued">—</div><div class="stat-foot">Queued / in progress</div></div><div class="stat"><div class="stat-label">COMPLETED <span>✓</span></div><div class="stat-number" id="stat-completed">—</div><div class="stat-foot">Confirmed or assumed finished</div></div></div>
         <div class="split"><section class="panel"><div class="section-head"><div><h3>Your watchlist</h3><p>Recently configured searches</p></div><button class="link-btn" data-goto="watches">View all →</button></div><div id="overview-watches"></div></section><section class="panel"><div class="section-head"><div><h3>Recent events</h3><p>Latest activity from the scheduler</p></div><button class="link-btn" data-goto="activity">Full history →</button></div><div id="overview-events"></div></section></div>
       </section>
       <section id="view-watches" class="view hidden">
@@ -40,7 +40,7 @@
           <div id="completed-watchlist" class="watch-grid"></div>
         </section>
       </section>
-      <section id="view-activity" class="view hidden"><div class="section-head page-section"><div><h2>Results & downloads</h2><p>History is retained across restarts. Each matched title is tracked once per watch.</p></div><select id="status-filter" class="compact-select" aria-label="Filter by status"><option value="">All statuses</option><option value="found">Found</option><option value="queued">Queued</option><option value="completed">Completed</option><option value="failed">Queue failed</option><option value="failed_download">Download failed</option><option value="skipped">Duplicate</option></select></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="results-body"></tbody></table></div></div><div class="panel activity-log"><div class="section-head"><div><h3>Event log</h3><p>Last 80 system events</p></div></div><div id="event-log"></div></div></section>
+      <section id="view-activity" class="view hidden"><div class="section-head page-section"><div><h2>Results & downloads</h2><p>History is retained across restarts. Each matched title is tracked once per watch.</p></div><select id="status-filter" class="compact-select" aria-label="Filter by status"><option value="">All statuses</option><option value="found">Found</option><option value="queued">Queued</option><option value="completed">Completed</option><option value="assumed_completed">Assumed complete</option><option value="failed">Queue failed</option><option value="failed_download">Download failed</option><option value="skipped">Duplicate</option></select></div><div class="panel"><div class="table-scroll"><table class="results"><thead><tr><th>RELEASE</th><th>WATCH</th><th>SIZE</th><th>STATUS</th><th>FOUND</th><th></th></tr></thead><tbody id="results-body"></tbody></table></div></div><div class="panel activity-log"><div class="section-head"><div><h3>Event log</h3><p>Last 80 system events</p></div></div><div id="event-log"></div></div></section>
       <section id="view-settings" class="view hidden">
         <div class="section-head page-section"><div><h2>Settings</h2><p>Changes save to <code>/data/config.json</code> and take effect without restarting NZBWatch.</p></div><span class="pill">LIVE CONFIGURATION</span></div>
         <form id="settings-form">
@@ -87,6 +87,23 @@
               <div class="field full check-field"><label class="settings-toggle"><input type="checkbox" name="dedupe_across_resolutions"> Do not download multiple resolutions of the same title across watches/scans</label><small>Uses the title before technical quality tags; intended for shows, movies and other video releases.</small></div>
             </div>
             <div class="note">Automatic watches queue the best available accepted result immediately. They do not wait for a preferred resolution to appear in a later scan. A one-off watch stops after a successful queue.</div>
+          </div>
+          <div class="panel settings-panel">
+            <h3>SABnzbd status reconciliation</h3>
+            <p>When SABnzbd automatically clears completed downloads and history, NZBWatch may be unable to verify the final outcome.</p>
+            <div class="form-grid settings-grid">
+              <div class="field full"><label for="sab-missing-policy">Job absent from queue and available history</label>
+                <select id="sab-missing-policy" name="sab_missing_policy">
+                  <option value="keep_queued">Keep as Queued (safer default)</option>
+                  <option value="assume_completed">Mark as Assumed complete after grace period</option>
+                </select>
+              </div>
+              <div class="field"><label for="sab-missing-grace">Absence grace period (minutes)</label>
+                <input id="sab-missing-grace" name="sab_missing_grace_minutes" type="number" min="5" max="10080" required>
+                <small>Default: 60 minutes, starting when the job first goes missing.</small>
+              </div>
+            </div>
+            <div class="note">Assumed complete is not verified success. Deleted, failed or manually removed jobs could also disappear. No confirmed-completion Pushover notification is sent for assumptions.</div>
           </div>
           <div class="panel settings-panel">
             <h3>Notifications</h3>

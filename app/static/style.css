@@ -12,3 +12,6 @@
 #view-watches .watch-grid.one-column{grid-template-columns:minmax(0,1fr)}
 #view-watches .watch-grid.two-column{grid-template-columns:repeat(2,minmax(0,1fr))}
 @media(max-width:1100px){#view-watches .watch-grid.two-column{grid-template-columns:minmax(0,1fr)}}
+
+/* v0.2.7: distinct styling for inferred, unverified outcomes. */
+.pill.assumed_completed{background:#423825;border-color:#81643b;color:#f2d69c}

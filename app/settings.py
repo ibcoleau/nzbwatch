@@ -25,6 +25,8 @@ DEFAULTS = {
     "allow_unknown_resolution": False,
     "dedupe_across_resolutions": True,
     "watchlist_columns": 2,  # 1 = full-width rows, 2 = two-column cards
+    "sab_missing_policy": "keep_queued",  # opt-in: assume_completed
+    "sab_missing_grace_minutes": 60,  # first absence must persist this long
 }
 
 
@@ -54,13 +56,17 @@ def verify(data: dict) -> dict:
     for key in SECRET_FIELDS:
         if not isinstance(out[key], str) or len(out[key]) > 512:
             raise ValueError(f"Invalid {key}")
-    for key in ("scan_interval_minutes", "max_queues_per_scan"):
+    for key in ("scan_interval_minutes", "max_queues_per_scan", "sab_missing_grace_minutes"):
         if type(out[key]) is not int:
             raise ValueError(f"{key} must be a whole number")
     if not 5 <= out["scan_interval_minutes"] <= 10080:
         raise ValueError("Scan interval must be 5–10080 minutes")
     if not 1 <= out["max_queues_per_scan"] <= 20:
         raise ValueError("Max queues per scan must be 1–20")
+    if not 5 <= out["sab_missing_grace_minutes"] <= 10080:
+        raise ValueError("Missing SAB job grace period must be 5–10080 minutes")
+    if out["sab_missing_policy"] not in ("keep_queued", "assume_completed"):
+        raise ValueError("Invalid missing SAB job policy")
     if type(out["watchlist_columns"]) is not int or out["watchlist_columns"] not in (1, 2):
         raise ValueError("Watchlist columns must be 1 or 2")
     for key in ("clean_search_terms", "strip_release_groups", "resolution_enabled", "allow_unknown_resolution", "dedupe_across_resolutions"):

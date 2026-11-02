@@ -8,7 +8,7 @@ const fmtSize = n => n ? (n / 1048576 >= 1024 ? (n/1073741824).toFixed(2)+' GiB'
 // This is distinct from a SABnzbd download's 'completed' status in Activity.
 const isCompletedWatch = w => !w.enabled && w.max_grabs > 0 && w.grab_count >= w.max_grabs;
 const watchStatus = w => isCompletedWatch(w) ? ['COMPLETE','completed'] : w.enabled ? ['ACTIVE',''] : ['PAUSED','paused'];
-const formatStatus = s => ({found:'Found',queued:'Queued',completed:'Completed',failed:'Queue failed',failed_download:'Download failed',skipped:'Duplicate'}[s] || s);
+const formatStatus = s => ({found:'Found',queued:'Queued',completed:'Completed',assumed_completed:'Assumed complete',failed:'Queue failed',failed_download:'Download failed',skipped:'Duplicate'}[s] || s);
 function toast(message, bad=false) { const el=$('toast');el.textContent=message;el.className='toast'+(bad?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.add('hidden'),4200); }
 async function api(path, opts={}) {
   const options={credentials:'same-origin',...opts};
@@ -36,7 +36,7 @@ function renderOverview(){
   $('overview-watches').innerHTML=ongoing.length?ongoing.slice(0,6).map(w=>`<div class="watch-row"><div class="row-icon">◎</div><div class="row-main"><strong>${esc(w.name)}</strong><small>${esc(w.query)}</small></div><span class="pill ${watchStatus(w)[1]}">${watchStatus(w)[0]}</span></div>`).join(''):empty(state.watches.length?'All watches have completed. View them in Watchlist → Completed.':'No watches yet. Add one to start monitoring.');
   $('overview-events').innerHTML=state.events.length?state.events.slice(0,7).map(eventHtml).join(''):empty('No activity yet.');
 }
-function eventHtml(e){const sym=({found:'✳',queued:'⇣',completed:'✓',failed_download:'!',error:'!',warning:'!',auth:'♙',search:'◎',config:'⚙'})[e.type]||'·';return `<div class="event-row"><div class="event-bullet ${e.type==='error'?'error':''}">${sym}</div><div class="event-text"><div>${esc(e.message)}</div><small>${esc(e.type)} &nbsp; · &nbsp; ${fmtTime(e.created_at)}</small></div></div>`;}
+function eventHtml(e){const sym=({found:'✳',queued:'⇣',completed:'✓',assumed_completed:'?',failed_download:'!',error:'!',warning:'!',auth:'♙',search:'◎',config:'⚙'})[e.type]||'·';return `<div class="event-row"><div class="event-bullet ${e.type==='error'?'error':''}">${sym}</div><div class="event-text"><div>${esc(e.message)}</div><small>${esc(e.type)} &nbsp; · &nbsp; ${fmtTime(e.created_at)}</small></div></div>`;}
 function watchCard(w){return `
   <article class="panel watch-card"><div class="watch-card-top"><div><h3>${esc(w.name)}</h3><div class="query">${esc(w.query)}</div></div><span class="pill ${watchStatus(w)[1]}">${watchStatus(w)[0]}</span></div>
   <div class="meta"><span>${w.mode==='auto'?'⇣ Auto-download':'✧ Notify only'}</span><span>↻ ${w.poll_minutes?esc(w.poll_minutes)+' min':'Global interval'}</span><span>${w.max_grabs===0?'Unlimited grabs':esc(w.grab_count)+' / '+esc(w.max_grabs)+' grabs'}</span>${w.sab_category?'<span>Category: '+esc(w.sab_category)+'</span>':''}</div>
@@ -84,9 +84,9 @@ async function loadSettings(){
 function settingsPayload(){
   const f=$('settings-form');
   const o={};
-  for(const k of ['hydra_url','sab_url','fallback_min_resolution'])o[k]=f.elements.namedItem(k).value.trim();
+  for(const k of ['hydra_url','sab_url','fallback_min_resolution','sab_missing_policy'])o[k]=f.elements.namedItem(k).value.trim();
   o.watchlist_columns=Number(f.elements.namedItem('watchlist_columns').value);
-  for(const k of ['scan_interval_minutes','max_queues_per_scan'])o[k]=Number(f.elements.namedItem(k).value);
+  for(const k of ['scan_interval_minutes','max_queues_per_scan','sab_missing_grace_minutes'])o[k]=Number(f.elements.namedItem(k).value);
   for(const k of ['clean_search_terms','strip_release_groups','resolution_enabled','allow_unknown_resolution','dedupe_across_resolutions'])o[k]=f.elements.namedItem(k).checked;
   o.resolution_order=f.elements.namedItem('resolution_order').value.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
   o.notification_types=[...document.querySelectorAll('#notify-checkboxes input:checked')].map(x=>x.value);

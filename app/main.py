@@ -216,6 +216,8 @@ class SettingsIn(BaseModel):
     allow_unknown_resolution: bool
     dedupe_across_resolutions: bool
     watchlist_columns: int = Field(default=2, ge=1, le=2)
+    sab_missing_policy: str = Field(default="keep_queued", pattern="^(keep_queued|assume_completed)$")
+    sab_missing_grace_minutes: int = Field(default=60, ge=5, le=10080)
 
     @field_validator("notification_types")
     @classmethod
