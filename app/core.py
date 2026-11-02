@@ -601,34 +601,125 @@ class Engine:
             return "failed"
 
     async def refresh_downloads(self):
+        """Reconcile queued NZBWatch jobs against SAB's queue and history.
+
+        SAB may omit matching jobs from a filtered history response (for example,
+        due to history view/limit behaviour). Querying only that response left
+        completed downloads looking permanently queued. Never infer completion
+        from absence: only SAB's explicit Completed / Failed status is terminal.
+        """
         if not self.config["sab_url"] or not self.config["sab_key"]:
             return
         with self.store.conn() as db:
-            rows = self.store.rows(db.execute("SELECT id,nzo_id,title FROM matches WHERE status='queued' AND nzo_id IS NOT NULL ORDER BY id DESC LIMIT 1000"))
+            rows = self.store.rows(db.execute(
+                "SELECT id,nzo_id,title,note FROM matches "
+                "WHERE status='queued' AND nzo_id IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1000"
+            ))
         if not rows:
             return
-        try:
-            # SAB supports filtering by nzo_ids. Query in batches to avoid huge URLs.
-            for i in range(0, len(rows), 50):
-                subset = rows[i:i + 50]
-                ids = ",".join(x["nzo_id"] for x in subset)
-                data = await self.sab_get("history", {"nzo_ids": ids, "limit": 100})
-                hist = {str(x.get("nzo_id")): x for x in data.get("history", {}).get("slots", [])}
+
+        def get_slots(response: dict, section: str) -> list[dict]:
+            value = response.get(section, {})
+            slots = value.get("slots", []) if isinstance(value, dict) else []
+            return [slot for slot in slots if isinstance(slot, dict)] if isinstance(slots, list) else []
+
+        def index_slots(slots: list[dict]) -> dict[str, dict]:
+            return {str(slot["nzo_id"]): slot for slot in slots if slot.get("nzo_id")}
+
+        # Limit pagination in case SAB ignores nzo_ids or history contains very
+        # large numbers of unrelated entries. A missing item remains queued and
+        # is clearly annotated rather than incorrectly marked as completed.
+        async def find_history_pages(target: set[str], *, archive: bool = False) -> dict[str, dict]:
+            found = {}
+            seen = set()
+            for start in range(0, 1000, 200):
+                response = await self.sab_get("history", {
+                    "start": start, "limit": 200, "archive": int(archive)
+                })
+                slots = get_slots(response, "history")
+                page = index_slots(slots)
+                found.update({key: job for key, job in page.items() if key in target})
+                # Stop if pagination isn't supported / same items are returned.
+                fresh = set(page) - seen
+                if target <= set(found) or not slots or not fresh or len(slots) < 200:
+                    break
+                seen.update(page)
+            return found
+
+        for i in range(0, len(rows), 50):
+            subset = rows[i:i + 50]
+            ids = {str(row["nzo_id"]) for row in subset}
+            try:
+                # First use the supported ID filter: usually a single cheap call.
+                data = await self.sab_get("history", {
+                    "nzo_ids": ",".join(sorted(ids)), "start": 0, "limit": 200
+                })
+                history = index_slots(get_slots(data, "history"))
+                missing = ids - set(history)
+                queue = {}
+                if missing:
+                    q = await self.sab_get("queue", {
+                        "nzo_ids": ",".join(sorted(missing)), "start": 0,
+                        "limit": 200
+                    })
+                    queue = index_slots(get_slots(q, "queue"))
+                    # Some SAB versions don't honour filtering as expected.
+                    # First attempt an unfiltered, bounded paginated lookup.
+                    not_found = missing - set(queue)
+                    if not_found:
+                        history.update(await find_history_pages(not_found))
+                        not_found -= set(history)
+                    # Archived history can contain a completed item no longer
+                    # present in the default history view.
+                    if not_found:
+                        history.update(await find_history_pages(not_found, archive=True))
+
                 for row in subset:
-                    job = hist.get(row["nzo_id"])
-                    if not job:
+                    nzo_id = str(row["nzo_id"])
+                    job = history.get(nzo_id)
+                    raw_status = str(job.get("status", "")).strip().casefold() if job else ""
+                    if raw_status in ("completed", "failed"):
+                        status = "completed" if raw_status == "completed" else "failed_download"
+                        failure = str(job.get("fail_message") or "") if raw_status == "failed" else ""
+                        note = safe_upstream_description(failure, secrets=(
+                            self.config["sab_key"], self.config.get("hydra_key", "")
+                        )) if failure else None
+                        with self.store.conn() as db:
+                            updated = db.execute(
+                                "UPDATE matches SET status=?,finished_at=?,note=? "
+                                "WHERE id=? AND status='queued'",
+                                (status, now(), note, row["id"])
+                            ).rowcount
+                        # Status transition is idempotent: one event + push max.
+                        if updated:
+                            self.store.log(status, f"{row['title']}: {'Completed' if status == 'completed' else 'Failed'}")
+                            await self.push(
+                                "NZB download completed" if status == "completed" else "NZB download failed",
+                                row["title"], "completed" if status == "completed" else "failed"
+                            )
                         continue
-                    raw_status = str(job.get("status", ""))
-                    if raw_status not in ("Completed", "Failed"):
+
+                    # A job might be downloading, processing, or paused; keep
+                    # queued until SAB confirms a terminal status.
+                    if job or nzo_id in queue:
+                        if row["note"] and row["note"].startswith("SAB status unverified:"):
+                            with self.store.conn() as db:
+                                db.execute("UPDATE matches SET note=NULL WHERE id=? AND status='queued'", (row["id"],))
                         continue
-                    status = "completed" if raw_status == "Completed" else "failed_download"
-                    with self.store.conn() as db:
-                        db.execute("UPDATE matches SET status=?,finished_at=?,note=? WHERE id=? AND status='queued'", (status, now(), str(job.get("fail_message", ""))[:500] or None, row["id"]))
-                    self.store.log(status, f"{row['title']}: {raw_status}")
-                    await self.push("NZB download " + raw_status.lower(), row["title"], "completed" if status == "completed" else "failed")
-        except Exception as ex:
-            log.warning("Could not refresh SABnzbd history: %s", safe_error(ex))
-            self.store.log("warning", f"SAB history refresh failed: {safe_error(ex)}")
+
+                    message = (
+                        "SAB status unverified: job not found in current queue or "
+                        "recent/archived history. Check SAB history retention or job ID."
+                    )
+                    if row["note"] != message:
+                        with self.store.conn() as db:
+                            db.execute("UPDATE matches SET note=? WHERE id=? AND status='queued'", (message, row["id"]))
+                        self.store.log("warning", f"{row['title']}: {message}")
+            except Exception as ex:
+                # Keep queued states intact if SAB is temporarily unavailable.
+                log.warning("Could not refresh SABnzbd status: %s", safe_error(ex))
+                self.store.log("warning", f"SAB status refresh failed: {safe_error(ex)}")
 
     async def sab_get(self, mode: str, extra: dict | None = None):
         if not self.config["sab_url"] or not self.config["sab_key"]:
