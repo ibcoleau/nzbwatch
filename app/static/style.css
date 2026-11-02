@@ -15,3 +15,7 @@
 
 /* v0.2.7: distinct styling for inferred, unverified outcomes. */
 .pill.assumed_completed{background:#423825;border-color:#81643b;color:#f2d69c}
+
+/* v0.2.8: compact, accessible dismissal action for missing SAB jobs. */
+.results .orphan-dismiss{min-width:29px;min-height:29px;padding:2px 8px;line-height:1.25;font-size:19px;font-weight:650}
+.results .orphan-dismiss:focus-visible{outline:2px solid var(--accent);outline-offset:2px}

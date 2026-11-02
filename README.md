@@ -1,9 +1,21 @@
-# NZBWatch v0.2.7
+# NZBWatch v0.2.8
 
 **Updated 2 November 2026.** Full application with Watchlist layouts, live settings, Hydra download fixes and optional handling for SABnzbd jobs automatically removed from queue/history.
 
 
 A self-hosted, password-protected NZBHydra2 watchlist and SABnzbd automation dashboard. Includes Pushover notifications. Designed for a **single Docker container and a persistent Docker volume**; no Node, Redis, or external database is needed.
+
+## v0.2.8: Dismiss orphaned SAB downloads from Activity
+
+When NZBWatch displays the warning **“SAB status unverified: job not found in current queue or recent/archived history”**, Activity now shows an **×** action. An **×** also appears for **Assumed complete** entries. Select **×** and confirm to remove that entry from the Activity results list.
+
+- The action is available only for jobs explicitly identified as missing/unverified; it is **not shown for active downloads or verified completions**.
+- Dismissal changes only the local NZBWatch record. **It does not delete or cancel anything in SABnzbd**, or delete downloaded files.
+- The record is marked `dismissed` and hidden, rather than erased. This retains the watch's `grab_count` and NZBWatch's global duplicate-prevention ledger, preventing automatic re-downloads of the dismissed release on a subsequent scan.
+- An audit event records dismissal. The original warning may remain in historical Event log entries. This is intentional.
+- To intentionally queue the same release again, a separate explicit re-grab/reset workflow would be needed; clicking × is **not** a retry action.
+
+No new configuration keys, service credentials, database columns, or volume mounts are required.
 
 ## v0.2.7: SABnzbd automatic history cleanup
 
@@ -137,8 +149,8 @@ python -m pytest -q
 
 ## Current limitations / next improvements
 
-- This is a **v0.2.0**, tested with mocked Hydra/SABnzbd responses and HTTP authentication flows. Live end-to-end connectivity to your actual Hydra, SABnzbd and Pushover installations has not been tested here.
-- `nzo_id` tracking depends on a job remaining visible in SABnzbd history. If history is purged before the next check, NZBWatch cannot verify completion and the match stays in `queued`.
+- This release is tested with mocked Hydra/SABnzbd responses and HTTP authentication flows. Live end-to-end connectivity to your actual Hydra, SABnzbd and Pushover installations has not been tested here.
+- `nzo_id` tracking depends on a job remaining visible in SABnzbd history. If history is purged before the next check, NZBWatch cannot verify completion. By default it remains `queued` with a diagnostic note; optional settings allow an **Assumed complete** status after a grace period.
 - There is one admin account, not role-based multi-user permissions.
 - JSON export/import covers watch rules only. For a full backup, back up the SQLite Docker volume.
 - No automatic upgrades, notification retry queue, or webhook callbacks yet. The app polls download history every 30 seconds and searches at each watch's interval or the inherited global interval.

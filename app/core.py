@@ -383,7 +383,7 @@ class Store:
 
     def recent(self):
         with self.conn() as db:
-            matches = self.rows(db.execute("SELECT m.id,m.watch_id,w.name AS watch_name,m.title,m.size_bytes,m.resolution,m.published,m.status,m.nzo_id,m.note,m.found_at,m.queued_at,m.finished_at FROM matches m JOIN watches w ON w.id=m.watch_id ORDER BY m.id DESC LIMIT 250"))
+            matches = self.rows(db.execute("SELECT m.id,m.watch_id,w.name AS watch_name,m.title,m.size_bytes,m.resolution,m.published,m.status,m.nzo_id,m.note,m.sab_missing_since,m.found_at,m.queued_at,m.finished_at FROM matches m JOIN watches w ON w.id=m.watch_id WHERE m.status != 'dismissed' ORDER BY m.id DESC LIMIT 250"))
             events = self.rows(db.execute("SELECT * FROM events ORDER BY id DESC LIMIT 80"))
             counts = dict(db.execute("SELECT (SELECT count(*) FROM watches) watches, (SELECT count(*) FROM watches WHERE enabled=1) active, (SELECT count(*) FROM matches WHERE status='found') found, (SELECT count(*) FROM matches WHERE status='queued') queued, (SELECT count(*) FROM matches WHERE status IN ('completed','assumed_completed')) completed").fetchone())
         return {"matches": matches, "events": events, "counts": counts}
@@ -392,6 +392,45 @@ class Store:
         with self.conn() as db:
             x = db.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone()
             return dict(x) if x else None
+
+    def dismiss_orphaned_match(self, mid: int):
+        """Hide a verified-missing SAB entry from Activity without losing dedupe.
+
+        Retaining the matches row, the grab ledger, and watch grab_count is
+        intentional: a recurring scan must not submit the same release again.
+        A status transition to 'dismissed' also prevents future reconciliation.
+        """
+        with self.conn() as db:
+            row = db.execute(
+                "SELECT id,title,status,nzo_id,note,sab_missing_since FROM matches WHERE id=?",
+                (mid,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(mid)
+            orphaned = (
+                row["status"] == "queued"
+                and bool(row["nzo_id"])
+                and bool(row["sab_missing_since"])
+                and (row["note"] or "").startswith("SAB status unverified:")
+            )
+            assumed = (
+                row["status"] == "assumed_completed"
+                and (row["note"] or "").startswith("Completion assumed:")
+            )
+            if not (orphaned or assumed):
+                raise ValueError("Only missing or assumed-complete SAB downloads can be dismissed")
+            updated = db.execute(
+                "UPDATE matches SET status='dismissed' WHERE id=? AND status=?",
+                (mid, row["status"]),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("The download status changed; refresh Activity and try again")
+            db.execute(
+                "INSERT INTO events(type,message,created_at) VALUES(?,?,?)",
+                ("dismissed", f"Dismissed orphaned download: {row['title']}"[:1200], now()),
+            )
+            db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 1000)")
+            return {"id": mid, "dismissed": True}
 
 
 class Engine:

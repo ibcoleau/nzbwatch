@@ -328,6 +328,17 @@ async def check_all(request: Request):
     return {"started": True, "count": len(ids)}
 
 
+@app.delete("/api/matches/{mid}")
+async def dismiss_orphaned_download(mid: int, request: Request):
+    require(request, True)
+    try:
+        return store.dismiss_orphaned_match(mid)
+    except KeyError:
+        raise HTTPException(404, "Download not found")
+    except ValueError as ex:
+        raise HTTPException(409, str(ex))
+
+
 @app.post("/api/matches/{mid}/queue")
 async def manual_queue(mid: int, request: Request):
     require(request, True)
